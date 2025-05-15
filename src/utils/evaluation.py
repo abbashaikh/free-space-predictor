@@ -23,8 +23,8 @@ from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import binary_dilation
 from scipy.stats import gaussian_kde
 
-import trajectron.visualization as visualization
-from trajectron.utils import prediction_output_to_trajectories
+import visualization as visualization
+from utils import prediction_output_to_trajectories
 
 
 def compute_ade_pt(predicted_trajs, gt_traj):

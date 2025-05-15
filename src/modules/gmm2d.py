@@ -16,7 +16,7 @@
 import torch
 import torch.distributions as td
 
-from trajectron.model.model_utils import to_one_hot
+from utils.model_utils import to_one_hot
 
 
 class GMM2D(td.MixtureSameFamily):

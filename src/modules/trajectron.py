@@ -21,10 +21,9 @@ import torch
 from torch import nn
 from trajdata import AgentBatch, AgentType
 
-import trajectron.evaluation as evaluation
-from trajectron.model.components import BayesianLastLayer
-from trajectron.model.mgcvae import MultimodalGenerativeCVAE
-from trajectron.model.model_utils import UpdateMode
+import evaluation as evaluation
+from modules.mgcvae import MultimodalGenerativeCVAE
+from utils.model_utils import UpdateMode
 
 
 class Trajectron(nn.Module):

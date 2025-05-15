@@ -41,9 +41,9 @@ class EventSampler():
         Draw negative samples based on regions of other agents in the future
         '''
         agent_fut_len = batch.agent_fut_len
-        max_fut_len = max(agent_fut_len)
+        valid_fut_len = torch.min(agent_fut_len.max(), batch.neigh_fut_len.max())
         # no samples beyond maximum available primary future
-        assert horizon <= max_fut_len
+        assert horizon <= valid_fut_len
 
         # valid positive samples
         ts = torch.arange(horizon, device=agent_fut_len.device)
@@ -51,8 +51,8 @@ class EventSampler():
         mask_valid_pos = mask_valid_pos.view(-1)
 
         # initiate primary and neighbor future tensors
-        primary_fut = batch.agent_fut[..., :max_fut_len, :2]
-        neigh_fut = batch.neigh_fut[..., :max_fut_len, :2]
+        primary_fut = batch.agent_fut[..., :valid_fut_len, :2]
+        neigh_fut = batch.neigh_fut[..., :valid_fut_len, :2]
         # positive
         sample_pos = primary_fut + torch.rand(
                 primary_fut.size(),

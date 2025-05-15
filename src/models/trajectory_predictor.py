@@ -1,5 +1,3 @@
-import os
-import sys
 from itertools import product
 from typing import Any, Dict, List, Union
 
@@ -7,8 +5,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from trajdata import AgentBatch, AgentType
-
-sys.path.append(os.path.abspath(".."))
 
 from modules.mgcvae import MultimodalGenerativeCVAE
 from modules.snce import SocialNCE

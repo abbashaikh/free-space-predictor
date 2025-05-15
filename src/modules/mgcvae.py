@@ -11,8 +11,8 @@ import torch.nn.functional as F
 import torch.nn.utils.parametrize as P
 import torch.optim as optim
 import trajdata.utils.arr_utils as arr_utils
-import wandb
 from trajdata import AgentBatch, AgentType
+import wandb
 
 sys.path.append(os.path.abspath(".."))
 

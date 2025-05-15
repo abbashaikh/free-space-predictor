@@ -1,0 +1,31 @@
+[tool.isort]
+profile = "black"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fsp"
+version = "0.1.0"
+description = "Scenario optimization based social navigation"
+readme = "README.md"
+authors = [
+  { name = "Abbas Shaikh", email = "abbas22shk@gmail.com" }
+]
+keywords = ["vae", "transformer", "scenario optimization", "robot social navigation"]
+classifiers = [
+  "Programming Language :: Python :: 3.9",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+]
+requires-python = ">=3.9"
+dependencies = [
+  "trajdata==1.2.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/abbashaikh/free-space-social-navigation.git"
+
+[tool.setuptools.packages.find]
+where = ["src"]

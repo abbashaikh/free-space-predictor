@@ -18,7 +18,7 @@ import torch
 import torch.distributions as td
 import wandb
 
-from trajectron.model.model_utils import ModeKeys
+from utils.model_utils import ModeKeys
 
 
 class DiscreteLatent(object):

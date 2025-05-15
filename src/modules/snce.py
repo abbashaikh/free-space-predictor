@@ -1,5 +1,3 @@
-import os
-import sys
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -8,9 +6,6 @@ import matplotlib
 matplotlib.use('Agg')
 
 from trajdata import AgentBatch
-
-sys.path.append(os.path.abspath(".."))
-
 from utils.sc_sampling import EventSampler
 
 class ProjHead(nn.Module):
