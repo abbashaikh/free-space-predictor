@@ -1,3 +1,5 @@
+import os
+import sys
 from itertools import product
 from typing import Any, Dict, List, Union
 
@@ -6,8 +8,12 @@ import torch
 import torch.nn as nn
 from trajdata import AgentBatch, AgentType
 
-from ..modules import MultimodalGenerativeCVAE, ProjHead, EventEncoder
-from ..utils import *
+sys.path.append(os.path.abspath(".."))
+
+from modules.mgcvae import MultimodalGenerativeCVAE
+from modules.snce import SocialNCE
+from utils.annealing import *
+from utils.sc_sampling import EventSampler
 
 class TrajectoryPredictor(nn.Module):
     """
@@ -37,12 +43,14 @@ class TrajectoryPredictor(nn.Module):
             )
         self.pred_state = self.hyperparams["pred_state"]
 
-    def set_environment(self, snce=None):
+
+    def set_environment(self):
+        """Initialize the MG-CVAE and Social NCE Models"""
         self.node_models_dict.clear()
         edge_types = list(product(AgentType, repeat=2))
 
         for node_type in AgentType:
-            # Only add a Model for NodeTypes we want to predict
+            # Only add MG-CVAE Models for NodeTypes we want to predict
             if node_type.name in self.pred_state.keys():
                 self.node_models_dict[node_type.name] = MultimodalGenerativeCVAE(
                     node_type,
@@ -50,9 +58,22 @@ class TrajectoryPredictor(nn.Module):
                     self.hyperparams,
                     self.device,
                     edge_types,
-                    log_writer=self.log_writer,
-                    snce=snce,
+                    log_writer=self.log_writer
                 )
+
+        if self.hyperparams["incl_robot_node"]:
+            x_size = 2*self.hyperparams["enc_rnn_dim_history"] + 4*self.hyperparams["enc_rnn_dim_future"]
+        else:
+            x_size = 2*self.hyperparams["enc_rnn_dim_history"]
+        # Add Social NCE Model
+        snce = SocialNCE(
+            feat_dim=x_size,
+            proj_head_dim=self.hyperparams["head_proj_dim"],
+            event_enc_dim=self.hyperparams["event_enc_dim"],
+            snce_head_dim=self.hyperparams["snce_head_dim"],
+            device=self.device
+        ).to(self.device)
+        self.node_models_dict["snce"] = self.model_registrar.get_model("snce", snce)
 
     @property
     def curr_iter(self):
@@ -75,29 +96,42 @@ class TrajectoryPredictor(nn.Module):
         for _, model in self.node_models_dict.items():
             step_annealers(model)
 
-    def forward(self, batch, update_mode: UpdateMode = UpdateMode.BATCH_FROM_PRIOR):
-        return self.train_loss(batch, update_mode=update_mode)
+    def forward(self, batch):
+        """Forward pass of the trajectory predictor"""
+        return self.train_loss(batch)
 
-    def train_loss(
-        self, batch: AgentBatch, update_mode: UpdateMode = UpdateMode.BATCH_FROM_PRIOR
-    ):
+    def train_loss(self, batch: AgentBatch):
+        """Calculate loss of the MGCVAE model as well as the Social NCE Loss"""
         batch.to(self.device)
 
         # Run forward pass
         losses: List[torch.Tensor] = list()
-        losses_task: List[torch.Tensor] = list()
+        losses_mgcvae: List[torch.Tensor] = list()
         losses_nce: List[torch.Tensor] = list()
+        
+        # Loss of the MG-CVAE model
         node_type: AgentType
         for node_type in batch.agent_types():
             model: MultimodalGenerativeCVAE = self.node_models_dict[node_type.name]
 
             agent_type_batch = batch.for_agent_type(node_type)
-            loss, loss_task, loss_nce = model(agent_type_batch, update_mode)
-            losses.append(loss)
-            losses_task.append(loss_task)
-            losses_nce.append(loss_nce)
+            enc, loss_mgcvae = model(agent_type_batch)
+            losses_mgcvae.append(loss_mgcvae)
 
-        return sum(losses), sum(losses_task), sum(losses_nce)
+        # Social NCE loss
+        # TODO: check if node has any future info
+        snce_model = self.node_models_dict["snce"]
+        if self.hyperparams['contrastive_weight'] > 0:
+            loss_nce = snce_model.loss(enc, batch)
+            loss = loss_mgcvae + loss_nce * self.hyperparams['contrastive_weight']
+        else:
+            loss = loss_mgcvae
+            loss_nce = torch.tensor([0.0])
+
+        losses_nce.append(loss_nce)
+        losses.append(loss)
+
+        return sum(losses), sum(losses_mgcvae), sum(losses_nce)
 
     def predict_and_evaluate_batch(
         self,

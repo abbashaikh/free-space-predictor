@@ -18,8 +18,7 @@ torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
         --grad_clip=0.909 \
         --learning_rate=0.016 \
         --sigma_eps_init=0.0002 \
-        --contrastive_weight=50.0 \
-        --constrastive_sampling=social
+        --contrastive_weight=50.0
 
 # To update a pre-trained model
 torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
@@ -42,5 +41,4 @@ torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
         --grad_clip=0.909 \
         --learning_rate=0.016 \
         --sigma_eps_init=0.0002 \
-        --contrastive_weight=50.0 \
-        --constrastive_sampling=social
+        --contrastive_weight=50.0

@@ -41,13 +41,6 @@ class ModelRegistrar(nn.Module):
         else:
             raise ValueError(f"{name} was never initialized in this Registrar!")
 
-    # def batch_add(self, model_dict):
-    #     """Adds a batch of models to the model dictionary"""
-    #     added_modules = {}
-    #     for name, model in model_dict.items():
-    #         added_modules[name] = self.get_model(name, model)
-    #     return added_modules
-
     def get_name_match(self, name):
         """Retrieve models that match the given name"""
         ret_model_list = nn.ModuleList()

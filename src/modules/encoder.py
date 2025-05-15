@@ -1,6 +1,5 @@
 import os
 import sys
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -9,7 +8,6 @@ import torch.nn.functional as F
 
 sys.path.append(os.path.abspath(".."))
 
-from modules.discrete_latent import DiscreteLatent
 from utils.model_utils import ModeKeys
 
 

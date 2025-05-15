@@ -39,9 +39,7 @@ class DiscreteLatent(object):
     def dist_from_h(self, h: torch.Tensor, mode: ModeKeys):
         logits_separated = torch.reshape(
             h,
-            (*h.shape[:2], self.N, self.K)
-            if self.hyperparams["adaptive"]
-            else (h.shape[0], self.N, self.K),
+            h.shape[0], self.N, self.K,
         )
 
         if self.N == 1:

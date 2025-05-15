@@ -42,6 +42,10 @@
   "dec_rnn_dim": 128,
   "dec_final_dim": 32,
 
+  "head_proj_dim": 32,
+  "snce_head_dim": 8,
+  "event_enc_dim": 8,
+
   "q_z_xy_MLP_dims": 0,
   "p_z_x_MLP_dims": 32,
   "GMM_components": 1,

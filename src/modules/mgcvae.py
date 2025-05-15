@@ -18,6 +18,8 @@ sys.path.append(os.path.abspath(".."))
 
 from modules.encoder import *
 from modules.decoder import *
+from modules.gmm2d import GMM2D
+from modules.discrete_latent import DiscreteLatent
 from modules.multihead_attention import MultiheadAttention
 from utils.model_utils import *
 
@@ -29,8 +31,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         hyperparams: Dict,
         device,
         edge_types,
-        log_writer=None,
-        snce=None,
+        log_writer=None
     ):
         super(MultimodalGenerativeCVAE, self).__init__()
 
@@ -90,8 +91,6 @@ class MultimodalGenerativeCVAE(nn.Module):
             self.hyperparams,
         )
 
-        self.snce = snce
-
     @property
     def curr_iter(self):
         """Returns the current iteration number"""
@@ -148,11 +147,11 @@ class MultimodalGenerativeCVAE(nn.Module):
                     num_heads=1,
                     kdim=hp["enc_rnn_dim_edge"],
                     vdim=hp["enc_rnn_dim_edge"],
-                    batch_first=hp["adaptive"]
+                    batch_first=False,
                 )
             )
 
-            self.eie_output_dims = hp["enc_rnn_dim_edge_influence"]
+            self.eie_output_dims = hp["enc_rnn_dim_history"]
             self.x_size += self.eie_output_dims
 
             # Edge Encoders
@@ -215,36 +214,92 @@ class MultimodalGenerativeCVAE(nn.Module):
                 self.latent.z_dim)
         )
 
-        # Decoder GRU
+        # Decoder
         if self.hyperparams["incl_robot_node"]:
             decoder_input_dims = (
                 self.pred_state_length + self.robot_state_length + self.z_size + self.x_size
             )
         else:
             decoder_input_dims = self.pred_state_length + self.z_size + self.x_size
-
+        # Decoder Pre-GRU
+        self.add_submodule(
+            nt + "/decoder/PreGRU",
+            model_if_absent=DecoderPreGRU(
+                self.state_length,
+                self.pred_state_length,
+                self.z_size,
+                self.x_size,
+                hp["dec_rnn_dim"],
+            )
+        )
+        # Decoder GRU
         self.add_submodule(
             nt + "/decoder/GRU",
             model_if_absent=DecoderGRU(
-                self.state_length,
-                self.pred_state_length,
                 self.z_size,
                 self.x_size,
                 hp["dec_rnn_dim"],
                 decoder_input_dims
             )
         )
-
         # Decoder GMM
         self.add_submodule(
             nt + "decoder/GMM",
-            model_if_absent=DecoderGMM(self.pred_state_length,hp["GMM_components"])
+            model_if_absent=DecoderGMM(
+                self.pred_state_length,
+                self.hyperparams["dec_final_dim"],
+                hp["GMM_components"]
+            )
         )
 
         # transfer modules to device
         for _, module in self.node_modules.items():
             module.to(self.device)
 
+    def encode_total_edge_influence(
+        self,
+        mode: ModeKeys,
+        encoded_edges: torch.Tensor,
+        num_neighbors: torch.Tensor,
+        node_history_encoded: torch.Tensor,
+        batch_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode edge interactions using attention"""
+        max_neighbors = encoded_edges.shape[0]
+
+        if len(encoded_edges) == 0:
+            combined_edges = torch.zeros(
+                (batch_size, self.eie_output_dims), device=self.device
+            )
+        else:
+            with_neighbors = num_neighbors > 0
+            combined_edges = torch.zeros_like(node_history_encoded).unsqueeze(0)
+
+            key_padding_mask = torch.triu(
+                torch.ones(
+                    (max_neighbors + 1, max_neighbors),
+                    dtype=torch.bool,
+                    device=self.device,
+                ),
+                diagonal=0,
+            )[num_neighbors]
+            combined_edges[:, with_neighbors], _ = self.node_modules[
+                self.node_type + "/edge_influence_encoder"
+            ](
+                query=node_history_encoded[with_neighbors].unsqueeze(0),
+                key=encoded_edges[:, with_neighbors],
+                value=encoded_edges[:, with_neighbors],
+                key_padding_mask=key_padding_mask[with_neighbors],
+                attn_mask=None,
+            )
+            combined_edges = F.dropout(
+                combined_edges.squeeze(0),
+                p=1.0 - self.hyperparams["rnn_kwargs"]["dropout_keep_prob"],
+                training=(mode == ModeKeys.TRAIN),
+            )
+        
+        return combined_edges
+    
     def obtain_encoded_tensors(
         self, mode: ModeKeys, batch: AgentBatch
     ) -> Tuple[
@@ -363,14 +418,13 @@ class MultimodalGenerativeCVAE(nn.Module):
 
                 # Encode Interactions per type
                 #TODO
-                # total_edge_influence, attn_weights = self.encode_total_edge_influence(
-                #     mode,
-                #     encoded_edges,
-                #     batch.num_neigh,
-                #     node_history_encoded,
-                #     node_history_len,
-                #     batch_size,
-                # )
+                total_edge_influence = self.encode_total_edge_influence(
+                    mode,
+                    encoded_edges,
+                    batch.num_neigh,
+                    node_history_encoded,
+                    batch_size,
+                )
 
             enc_concat_list.append(total_edge_influence) # [bs/nbs, enc_rnn_dim]
 
@@ -430,32 +484,6 @@ class MultimodalGenerativeCVAE(nn.Module):
 
         return enc, x_r_t, y_e, y_r, y
 
-    def project_to_GMM_params(
-        self, tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Projects tensor to parameters of a GMM with N components and D dimensions.
-
-        :param tensor: Input tensor.
-        :return: tuple(log_pis, mus, log_sigmas, corrs)
-            WHERE
-            - log_pis: Weight (logarithm) of each GMM component. [N]
-            - mus: Mean of each GMM component. [N, D]
-            - log_sigmas: Standard Deviation (logarithm) of each GMM component. [N, D]
-            - corrs: Correlation between the GMM components. [N]
-        """
-        log_pis = self.node_modules[self.node_type + "/decoder/proj_to_GMM_log_pis"](
-            tensor
-        )
-        mus = self.node_modules[self.node_type + "/decoder/proj_to_GMM_mus"](tensor)
-        log_sigmas = self.node_modules[
-            self.node_type + "/decoder/proj_to_GMM_log_sigmas"
-        ](tensor)
-        corrs = torch.tanh(
-            self.node_modules[self.node_type + "/decoder/proj_to_GMM_corrs"](tensor)
-        )
-        return log_pis, mus, log_sigmas, corrs
-
     def p_y_xz(
         self,
         mode,
@@ -463,15 +491,12 @@ class MultimodalGenerativeCVAE(nn.Module):
         x_nr_t,
         y_r,
         n_s_t0,
-        pos_hist_len,
         z_stacked,
         dt,
         prediction_horizon,
         num_samples,
         num_components=1,
-        z_mode=False,
         gmm_mode=False,
-        update_mode: UpdateMode = UpdateMode.NO_UPDATE,
     ):
         r"""
         .. math:: p_\psi(\mathbf{y}_i \mid \mathbf{x}_i, z)
@@ -495,18 +520,18 @@ class MultimodalGenerativeCVAE(nn.Module):
         z = torch.reshape(z_stacked, (-1, self.latent.z_dim))
         zx = torch.cat([z, x.repeat(num_samples * num_components, 1)], dim=1)
 
-        cell = self.node_modules[self.node_type + "/decoder/rnn_cell"]
-        initial_h_model = self.node_modules[self.node_type + "/decoder/initial_h"]
-        post_cell: nn.Module = self.node_modules[self.node_type + "/decoder/post_rnn"]
-
-        initial_state = initial_h_model(zx)
+        # Infer initial action state for node from current state
+        initial_state, a_0 = self.node_modules[self.node_type + "/decoder/PreGRU"](
+            self.hyperparams,
+            num_samples,
+            num_components,
+            zx,
+            n_s_t0,
+            x_nr_t
+        )
 
         log_pis, mus, log_sigmas, corrs, a_sample = [], [], [], [], []
 
-        # Infer initial action state for node from current state
-        a_0 = self.node_modules[self.node_type + "/decoder/state_action"](n_s_t0)
-
-        state = initial_state
         if self.hyperparams["incl_robot_node"]:
             input_ = torch.cat(
                 [
@@ -519,12 +544,15 @@ class MultimodalGenerativeCVAE(nn.Module):
         else:
             input_ = torch.cat([zx, a_0.repeat(num_samples * num_components, 1)], dim=1)
 
+        state = initial_state
         for j in range(ph):
-            h_state = cell(input_, state)
-            decoder_out = F.relu(post_cell(h_state))
-            log_pi_t, mu_t, log_sigma_t, corr_t = self.project_to_GMM_params(
-                decoder_out
+            h_state, decoder_out = self.node_modules[self.node_type + "/decoder/GRU"](
+                input_,
+                state
             )
+            log_pi_t, mu_t, log_sigma_t, corr_t = self.node_modules[
+                self.node_type  + "/decoder/GMM"
+            ](decoder_out)
 
             gmm = GMM2D(log_pi_t, mu_t, log_sigma_t, corr_t)  # [k;bs, pred_dim]
 
@@ -661,11 +689,9 @@ class MultimodalGenerativeCVAE(nn.Module):
         y: torch.Tensor,
         y_r: torch.Tensor,
         pos_hist: torch.Tensor,
-        pos_hist_len: torch.Tensor,
         z: torch.Tensor,
         dt: torch.Tensor,
         num_samples: int,
-        update_mode: UpdateMode,
     ):
         """
         Decoder of the CVAE.
@@ -689,13 +715,11 @@ class MultimodalGenerativeCVAE(nn.Module):
             x_nr_t,
             y_r,
             pos_hist,
-            pos_hist_len,
             z,
             dt,
             y.shape[1],
             num_samples,
             num_components=num_components,
-            update_mode=update_mode,
         )
 
         if self.hyperparams["single_mode_multi_sample"]:
@@ -732,15 +756,11 @@ class MultimodalGenerativeCVAE(nn.Module):
 
         return log_p_y_xz
 
-    def forward(
-        self, batch: AgentBatch, update_mode: UpdateMode = UpdateMode.BATCH_FROM_PRIOR
-    ) -> torch.Tensor:
-        return self.train_loss(batch, update_mode=update_mode)
+    def forward(self, batch: AgentBatch) -> torch.Tensor:
+        """Forward pass of MG-CVAE"""
+        return self.train_loss(batch)
 
-    def train_loss(
-        self, batch: AgentBatch,
-        update_mode: UpdateMode = UpdateMode.BATCH_FROM_PRIOR,
-    ) -> torch.Tensor:
+    def train_loss(self, batch: AgentBatch) -> torch.Tensor:
         """
         Calculates the training loss for a batch.
 
@@ -755,7 +775,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         :param robot: Standardized robot state over time. [bs, t, robot_state]
         :param map: Tensor of Map information. [bs, channels, x, y]
         :param prediction_horizon: Number of prediction timesteps.
-        :return: Scalar tensor -> nll loss
+        :return: tensor -> encoding, Scalar tensor -> nll loss
         """
         mode = ModeKeys.TRAIN
 
@@ -775,11 +795,9 @@ class MultimodalGenerativeCVAE(nn.Module):
             y,
             y_r,
             pos_hist,
-            batch.agent_hist_len,
             z,
             batch.dt,
             self.hyperparams["k"],
-            update_mode,
         )
 
         log_p_y_xz_mean = torch.mean(log_p_y_xz, dim=0)  # [nbs]
@@ -789,17 +807,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         mutual_inf_p = mutual_inf_mc(self.latent.p_dist)
 
         ELBO = log_likelihood - self.kl_weight * kl + 1.0 * mutual_inf_p
-        loss_task = -ELBO
-
-        # position data for contrastive data sampling
-        # primary_curr = None
-        # primary_next = None
-        # if self.hyperparams['contrastive_weight'] > 0:
-        #     loss_nce = self.snce.loss(inputs, neighbors_prev, primary_next, neighbors_next, h_stack.permute(1, 2, 0, 3)) # TODO
-        #     loss = loss_task + loss_nce * self.hyperparams['contrastive_weight']
-        # else:
-        #     loss = loss_task
-        #     loss_nce = torch.tensor([0.0])
+        loss = -ELBO
 
         if (
             self.hyperparams["log_histograms"]
@@ -822,7 +830,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                     f"{str(self.node_type)}/mutual_information_q": mutual_inf_q.item(),
                     f"{str(self.node_type)}/mutual_information_p": mutual_inf_p.item(),
                     f"{str(self.node_type)}/log_likelihood": log_likelihood.item(),
-                    f"{str(self.node_type)}/loss": loss.item(),
+                    f"{str(self.node_type)}/mgcvae loss": loss.item(),
                 },
                 step=self.curr_iter,
                 commit=False,
@@ -831,8 +839,8 @@ class MultimodalGenerativeCVAE(nn.Module):
                 self.latent.summarize_for_tensorboard(
                     self.log_writer, str(self.node_type), self.curr_iter
                 )
-        # return loss, loss_task, loss_nce
-        return loss_task
+        return enc, loss
+        # return loss_task
 
     def predict(
         self,
@@ -844,7 +852,6 @@ class MultimodalGenerativeCVAE(nn.Module):
         full_dist=True,
         all_z_sep=False,
         output_dists=False,
-        update_mode=UpdateMode.NO_UPDATE,
     ):
         """
         Predicts the future of a batch of nodes.
@@ -872,13 +879,11 @@ class MultimodalGenerativeCVAE(nn.Module):
             all_z_sep=all_z_sep,
         )
 
-        if self.hyperparams["adaptive"]:
-            pos_hist: torch.Tensor = batch.agent_hist[..., :2]
-        else:
-            # This is the old n_s_t0 (just the state at the current timestep, t=0).
-            pos_hist: torch.Tensor = batch.agent_hist[
-                torch.arange(batch.agent_hist.shape[0]), batch.agent_hist_len - 1
-            ]
+
+        # This is the old n_s_t0 (just the state at the current timestep, t=0).
+        pos_hist: torch.Tensor = batch.agent_hist[
+            torch.arange(batch.agent_hist.shape[0]), batch.agent_hist_len - 1
+        ]
 
         y_dist, our_sampled_future = self.p_y_xz(
             mode,
@@ -886,19 +891,16 @@ class MultimodalGenerativeCVAE(nn.Module):
             x_nr_t,
             y_r,
             pos_hist,
-            batch.agent_hist_len,
             z,
             batch.dt,
             prediction_horizon,
             num_samples,
             num_components,
-            z_mode,
             gmm_mode,
-            update_mode,
         )
 
         if output_dists:
             return y_dist, our_sampled_future
         else:
-            return our_sampled_future#
+            return our_sampled_future
 
