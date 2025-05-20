@@ -64,9 +64,10 @@ class TrajectoryPredictor(nn.Module):
         # Add Social NCE Model
         snce = SocialNCE(
             feat_dim=x_size,
-            proj_head_dim=self.hyperparams["head_proj_dim"],
+            proj_head_dim=self.hyperparams["proj_head_dim"],
             event_enc_dim=self.hyperparams["event_enc_dim"],
             snce_head_dim=self.hyperparams["snce_head_dim"],
+            hyperparams=self.hyperparams,
             device=self.device
         ).to(self.device)
         self.node_models_dict["snce"] = self.model_registrar.get_model("snce", snce)
@@ -84,8 +85,8 @@ class TrajectoryPredictor(nn.Module):
 
     def set_all_annealing_params(self):
         """Set the annealing parameters for all models in the predictor"""
-        for _, model in self.node_models_dict.items():
-            set_annealing_params(model)
+        for name, model in self.node_models_dict.items():
+            set_annealing_params(name, model)
 
     def step_all_annealers(self):
         """Step the annealers for all models in the predictor"""
@@ -104,35 +105,30 @@ class TrajectoryPredictor(nn.Module):
         losses: List[torch.Tensor] = list()
         losses_mgcvae: List[torch.Tensor] = list()
         losses_nce: List[torch.Tensor] = list()
-        
+
         # Loss of the MG-CVAE model
         node_type: AgentType
         for node_type in batch.agent_types():
+            # MG-CVAE loss
             model: MultimodalGenerativeCVAE = self.node_models_dict[node_type.name]
-
             agent_type_batch = batch.for_agent_type(node_type)
             enc, loss_mgcvae = model(agent_type_batch)
             losses_mgcvae.append(loss_mgcvae)
-
-        # Social NCE loss
-        # TODO: check if node has any future info
-        snce_model = self.node_models_dict["snce"]
-        if self.hyperparams['contrastive_weight'] > 0:
-            loss_nce = snce_model.loss(enc, batch)
-            loss = loss_mgcvae + loss_nce * self.hyperparams['contrastive_weight']
-        else:
-            loss = loss_mgcvae
-            loss_nce = torch.tensor([0.0])
-
-        losses_nce.append(loss_nce)
-        losses.append(loss)
+            # Social NCE loss
+            snce_model: SocialNCE = self.node_models_dict["snce"]
+            if self.hyperparams['contrastive_weight'] > 0:
+                loss_nce = snce_model.loss(enc, batch)
+                losses.append(loss_mgcvae + loss_nce * self.hyperparams["contrastive_weight"])
+            else:
+                loss_nce = torch.tensor([0.0])
+                losses.append(loss_mgcvae)
+            losses_nce.append(loss_nce)
 
         return sum(losses), sum(losses_mgcvae), sum(losses_nce)
 
     def predict_and_evaluate_batch(
         self,
         batch: AgentBatch,
-        update_mode: UpdateMode = UpdateMode.NO_UPDATE,
         output_for_pd: bool = False,
     ) -> Union[List[Dict[str, Any]], Dict[AgentType, Dict[str, torch.Tensor]]]:
         """Predicts from a batch and then evaluates the output, returning the batched errors."""
@@ -159,8 +155,7 @@ class TrajectoryPredictor(nn.Module):
                 z_mode=True,
                 gmm_mode=True,
                 full_dist=False,
-                output_dists=False,
-                update_mode=update_mode,
+                output_dists=False
             )
 
             # Run forward pass
@@ -171,8 +166,7 @@ class TrajectoryPredictor(nn.Module):
                 z_mode=False,
                 gmm_mode=False,
                 full_dist=True,
-                output_dists=True,
-                update_mode=update_mode,
+                output_dists=True
             )
 
             batch_eval: Dict[
@@ -194,7 +188,6 @@ class TrajectoryPredictor(nn.Module):
     def predict(
         self,
         batch: AgentBatch,
-        update_mode: UpdateMode = UpdateMode.NO_UPDATE,
         num_samples=1,
         prediction_horizon=None,
         z_mode=False,
@@ -244,7 +237,6 @@ class TrajectoryPredictor(nn.Module):
                 full_dist=full_dist,
                 all_z_sep=all_z_sep,
                 output_dists=output_dists,
-                update_mode=update_mode,
             )
 
             if output_dists:

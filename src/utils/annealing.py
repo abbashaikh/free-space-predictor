@@ -81,48 +81,58 @@ def create_new_scheduler(
     obj.schedulers.append(value_scheduler)
     obj.annealed_vars.append(name)
 
-def set_annealing_params(obj):
+def set_annealing_params(name, obj):
     """Set the annealing parameters for the object"""
     obj.schedulers = list()
     obj.annealed_vars = list()
 
-    create_new_scheduler(
-        obj,
-        name="kl_weight",
-        annealer=sigmoid_anneal,
-        annealer_kws={
-            "start": obj.hyperparams["kl_weight_start"],
-            "finish": obj.hyperparams["kl_weight"],
-            "center_step": obj.hyperparams["kl_crossover"],
-            "steps_lo_to_hi": obj.hyperparams["kl_crossover"]
-            / obj.hyperparams["kl_sigmoid_divisor"],
-        },
-    )
-
-    create_new_scheduler(
-        obj,
-        name="latent.temp",
-        annealer=exp_anneal,
-        annealer_kws={
-            "start": obj.hyperparams["tau_init"],
-            "finish": obj.hyperparams["tau_final"],
-            "rate": obj.hyperparams["tau_decay_rate"],
-        },
-    )
-
-    create_new_scheduler(
-        obj,
-        name="latent.z_logit_clip",
-        annealer=sigmoid_anneal,
-        annealer_kws={
-            "start": obj.hyperparams["z_logit_clip_start"],
-            "finish": obj.hyperparams["z_logit_clip_final"],
-            "center_step": obj.hyperparams["z_logit_clip_crossover"],
-            "steps_lo_to_hi": obj.hyperparams["z_logit_clip_crossover"]
-            / obj.hyperparams["z_logit_clip_divisor"],
-        },
-        creation_condition=obj.hyperparams["use_z_logit_clipping"],
-    )
+    if name=="snce":
+        create_new_scheduler(
+            obj,
+            name="temperature",
+            annealer=exp_anneal,
+            annealer_kws={
+                "start": obj.hyperparams["contrastive_tau_init"],
+                "finish": obj.hyperparams["contrastive_tau_final"],
+                "rate": obj.hyperparams["tau_decay_rate"],
+            },
+        )
+    else:
+        create_new_scheduler(
+            obj,
+            name="kl_weight",
+            annealer=sigmoid_anneal,
+            annealer_kws={
+                "start": obj.hyperparams["kl_weight_start"],
+                "finish": obj.hyperparams["kl_weight"],
+                "center_step": obj.hyperparams["kl_crossover"],
+                "steps_lo_to_hi": obj.hyperparams["kl_crossover"]
+                / obj.hyperparams["kl_sigmoid_divisor"],
+            },
+        )
+        create_new_scheduler(
+            obj,
+            name="latent.temp",
+            annealer=exp_anneal,
+            annealer_kws={
+                "start": obj.hyperparams["latent_tau_init"],
+                "finish": obj.hyperparams["latent_tau_final"],
+                "rate": obj.hyperparams["tau_decay_rate"],
+            },
+        )
+        create_new_scheduler(
+            obj,
+            name="latent.z_logit_clip",
+            annealer=sigmoid_anneal,
+            annealer_kws={
+                "start": obj.hyperparams["z_logit_clip_start"],
+                "finish": obj.hyperparams["z_logit_clip_final"],
+                "center_step": obj.hyperparams["z_logit_clip_crossover"],
+                "steps_lo_to_hi": obj.hyperparams["z_logit_clip_crossover"]
+                / obj.hyperparams["z_logit_clip_divisor"],
+            },
+            creation_condition=obj.hyperparams["use_z_logit_clipping"],
+        )
 
 def step_annealers(obj):
     """Step the annealers for the object"""

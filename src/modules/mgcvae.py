@@ -1,26 +1,20 @@
-import os
-import sys
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-import torch.distributions as td
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.utils.parametrize as P
-import torch.optim as optim
-import trajdata.utils.arr_utils as arr_utils
 from trajdata import AgentBatch, AgentType
 import wandb
-
-sys.path.append(os.path.abspath(".."))
 
 from modules.encoder import *
 from modules.decoder import *
 from modules.gmm2d import GMM2D
 from modules.discrete_latent import DiscreteLatent
-from modules.multihead_attention import MultiheadAttention
+
+import dynamics as dynamic_module
+
 from utils.model_utils import *
 
 class MultimodalGenerativeCVAE(nn.Module):
@@ -76,6 +70,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         self.x_size = self.hyperparams["enc_rnn_dim_history"] # To keep track of the size of the encoding vector
         self.z_size = self.hyperparams["N"] * self.hyperparams["K"]
         self.latent = None
+        # build mg-cvae model and update variables defining the model's internal sizes 
         self.build_model()
 
         dynamic_class = getattr(
@@ -164,17 +159,16 @@ class MultimodalGenerativeCVAE(nn.Module):
                         ]
                     )
                 )
-                
+
                 #TODO: implement edge encoder modules
                 self.add_submodule(
-                    "->".join([edge_type[1].name, edge_type[2].name]) + "/edge_encoder",
+                    "->".join([edge_type[0].name, edge_type[1].name]) + "/edge_encoder",
                     model_if_absent=EdgeEncoder(
                         self.state_length,
                         neighbor_state_length,
                         hp["enc_rnn_dim_edge"]
                     )
                 )
-
 
         # Map Encoder
         if hp["map_encoding"]:
@@ -236,15 +230,14 @@ class MultimodalGenerativeCVAE(nn.Module):
         self.add_submodule(
             nt + "/decoder/GRU",
             model_if_absent=DecoderGRU(
-                self.z_size,
-                self.x_size,
                 hp["dec_rnn_dim"],
-                decoder_input_dims
+                decoder_input_dims,
+                hp["dec_final_dim"]
             )
         )
         # Decoder GMM
         self.add_submodule(
-            nt + "decoder/GMM",
+            nt + "/decoder/GMM",
             model_if_absent=DecoderGMM(
                 self.pred_state_length,
                 self.hyperparams["dec_final_dim"],
@@ -402,7 +395,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                     # forward pass through edge encoder for node-neigh pair
                     edge_str = "->".join([AgentType(neigh_type.item()).name, self.node_type])
                     ret = nm[edge_str + "/edge_encoder"](
-                        joint_history_type, joint_history_type_len
+                        mode, hp, joint_history_type, joint_history_type_len
                     )
                     returns.append(ret)
                     num_already_done += num_matching_type
@@ -478,9 +471,9 @@ class MultimodalGenerativeCVAE(nn.Module):
         if mode == ModeKeys.TRAIN or mode == ModeKeys.EVAL:
             y = batch.agent_fut[..., :2]
             y_lens = batch.agent_fut_len
-            y_e = self.encode_node_future(mode, node_present, y, y_lens)
-            if self.hyperparams["adaptive"]:
-                y_e = y_e.expand((-1, enc.shape[1], -1))
+            y_e = nm[nt + "/node_future_encoder"](
+                hp, mode, node_present, y, y_lens
+            )
 
         return enc, x_r_t, y_e, y_r, y
 
@@ -522,12 +515,8 @@ class MultimodalGenerativeCVAE(nn.Module):
 
         # Infer initial action state for node from current state
         initial_state, a_0 = self.node_modules[self.node_type + "/decoder/PreGRU"](
-            self.hyperparams,
-            num_samples,
-            num_components,
             zx,
             n_s_t0,
-            x_nr_t
         )
 
         log_pis, mus, log_sigmas, corrs, a_sample = [], [], [], [], []

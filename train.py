@@ -16,7 +16,6 @@
 import json
 import os
 import pathlib
-import pickle
 import random
 import time
 from collections import defaultdict
@@ -29,20 +28,18 @@ import wandb
 from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils import data
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from trajdata import AgentType, UnifiedDataset
 from trajdata.augmentation import NoiseHistories
 from trajdata.data_structures.batch import AgentBatch
-from trajdata.data_structures.data_index import AgentDataIndex
-from trajdata.visualization import vis as trajdata_vis
 
 import trajectron.evaluation as evaluation
 import trajectron.visualization as visualization
-from trajectron.argument_parser import args
-from trajectron.model.model_registrar import ModelRegistrar
-from trajectron.model.model_utils import UpdateMode
-from trajectron.model.trajectron import Trajectron
-from trajectron.utils.comm import all_gather
+from utils.argument_parser import args
+from modules.model_registrar import ModelRegistrar
+from utils.model_utils import UpdateMode
+from models.trajectory_predictor import TrajectoryPredictor
+from utils.comm import all_gather
 
 # torch.autograd.set_detect_anomaly(True)
 

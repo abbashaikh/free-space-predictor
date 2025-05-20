@@ -48,7 +48,7 @@ class DecoderGRU(nn.Module):
     ):
         super(DecoderGRU, self).__init__()
         self.rnn_cell = nn.GRUCell(decoder_input_dim, rnn_hidden_dim)
-        self.post_rnn = nn.Linear(rnn_hidden_dim, 2 * decoder_final_dim)
+        self.post_rnn = nn.Linear(rnn_hidden_dim, decoder_final_dim)
 
     def forward(
             self,
@@ -80,10 +80,10 @@ class DecoderGMM(nn.Module):
         # gmm_corrs_dim = 1
         # gmm_dims = gmm_mus_dim + gmm_log_sigmas_dim + gmm_corrs_dim
 
-        self.proj_to_log_pis = nn.Linear(2*decoder_final_dim, gmm_components) #TODO: one_layer_equivalent?
-        self.proj_to_mus = nn.Linear(2*decoder_final_dim, gmm_components*pred_state_length) #TODO: ""
-        self.proj_to_log_sigmas = nn.Linear(2*decoder_final_dim, gmm_components*pred_state_length) #TODO: ""
-        self.proj_to_corrs = nn.Linear(2*decoder_final_dim, gmm_components) #TODO: ""
+        self.proj_to_log_pis = nn.Linear(decoder_final_dim, gmm_components)
+        self.proj_to_mus = nn.Linear(decoder_final_dim, gmm_components*pred_state_length)
+        self.proj_to_log_sigmas = nn.Linear(decoder_final_dim, gmm_components*pred_state_length)
+        self.proj_to_corrs = nn.Linear(decoder_final_dim, gmm_components)
 
     def forward(self, gmm_input):
         """Forward pass of the GMM decoder module"""

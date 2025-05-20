@@ -39,7 +39,7 @@ class DiscreteLatent(object):
     def dist_from_h(self, h: torch.Tensor, mode: ModeKeys):
         logits_separated = torch.reshape(
             h,
-            h.shape[0], self.N, self.K,
+            (h.shape[0], self.N, self.K),
         )
 
         if self.N == 1:
@@ -102,11 +102,7 @@ class DiscreteLatent(object):
             z_NK = self.p_dist.sample((num_samples,))
             k = num_samples
 
-        ret_shape = (
-            (k, bs, -1, self.N * self.K)
-            if self.hyperparams["adaptive"]
-            else (k, bs, self.N * self.K)
-        )
+        ret_shape = (k, bs, self.N * self.K)
 
         if mode == ModeKeys.PREDICT:
             return torch.reshape(z_NK, ret_shape), num_samples, num_components

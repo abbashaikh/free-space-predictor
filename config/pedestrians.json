@@ -4,7 +4,8 @@
   "grad_clip": 10.0,
 
   "learning_rate_style": "exp",
-  "learning_rate": 0.001,
+  "learning_rate": 0.016,
+  "lr_step": 0.0,
   "min_learning_rate": 0.00001,
   "learning_decay_rate": 0.9999,
 
@@ -40,9 +41,9 @@
   "enc_rnn_dim_history": 32,
   "enc_rnn_dim_future": 32,
   "dec_rnn_dim": 128,
-  "dec_final_dim": 32,
+  "dec_final_dim": 64,
 
-  "head_proj_dim": 32,
+  "proj_head_dim": 32,
   "snce_head_dim": 8,
   "event_enc_dim": 8,
 
@@ -55,8 +56,10 @@
   "N": 1,
   "K": 25,
 
-  "tau_init": 2.0,
-  "tau_final": 0.05,
+  "latent_tau_init": 2.0,
+  "latent_tau_final": 0.05,
+  "contrastive_tau_init": 0.5,
+  "contrastive_tau_final": 0.05,
   "tau_decay_rate": 0.997,
 
   "use_z_logit_clipping": true,

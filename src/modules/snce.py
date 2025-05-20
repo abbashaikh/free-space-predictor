@@ -61,11 +61,13 @@ class SocialNCE(nn.Module):
         proj_head_dim,
         event_enc_dim,
         snce_head_dim,
+        hyperparams,
         device,
         horizon=3,
         temperature=0.1
     ):
         super(SocialNCE, self).__init__()
+        self.hyperparams = hyperparams
         self.device = device
         # encoders
         self.head_projection = ProjHead(
