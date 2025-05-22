@@ -1,121 +1,193 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-# 
-# http://www.apache.org/licenses/LICENSE-2.0
-# 
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""
+Train trajectpory predictor
+"""
 
-import json
 import os
-import pathlib
+import json
 import random
 import time
+import pathlib
+# import pickle
 from collections import defaultdict
 from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
-from torch import nn, optim
+from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils import data
 from tqdm import tqdm
+import wandb
+
 from trajdata import AgentType, UnifiedDataset
 from trajdata.augmentation import NoiseHistories
 from trajdata.data_structures.batch import AgentBatch
 
-import trajectron.evaluation as evaluation
-import trajectron.visualization as visualization
+from utils import evaluation
+from utils import visualization
 from utils.argument_parser import args
 from modules.model_registrar import ModelRegistrar
-from utils.model_utils import UpdateMode
 from models.trajectory_predictor import TrajectoryPredictor
 from utils.comm import all_gather
 
-# torch.autograd.set_detect_anomaly(True)
+# TODO: For nuScenes dataset
+# def restrict_to_predchal(
+#     dataset: UnifiedDataset,
+#     split: str,
+#     city: str = "",
+# ) -> None:
+#     curr_dir = pathlib.Path(__file__).parent.resolve()
+#     with open(
+#         curr_dir / f"experiments/nuScenes/predchal{city}_{split}_index.pkl", "rb"
+#     ) as f:
+#         within_challenge_split = pickle.load(f)
 
-def train(rank, args):
+#     within_challenge_split = [
+#         (dataset.cache_path / scene_info_path, num_elems, elems)
+#         for scene_info_path, num_elems, elems in within_challenge_split
+#     ]
+
+#     dataset._scene_index = [orig_path for orig_path, _, _ in within_challenge_split]
+
+#     # The data index is effectively a big list of tuples taking the form:
+#     # (scene_path: str, index_len: int, valid_timesteps: np.ndarray[, agent_name: str])
+#     dataset._data_index = AgentDataIndex(within_challenge_split, dataset.verbose)
+#     dataset._data_len: int = len(dataset._data_index)
+
+def set_seed(seed: Optional[int]):
+    """Set manual seed to replicate, if provided"""
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        args.device = f"cuda:{rank}"
+        torch.cuda.manual_seed_all(seed)
+
+
+def get_device(rank: int) -> torch.device:
+    """CPU or CUDA"""
+    if torch.cuda.is_available():
         torch.cuda.set_device(rank)
-    else:
-        args.device = "cpu"
+        return torch.device(f"cuda:{rank}")
+    return torch.device("cpu")
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
 
-    ## Load hyperparameters from json
+def init_distributed():
+    """TODO"""
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend=backend)
+
+    print(
+        f"[{os.getpid()}]: world_size = {dist.get_world_size()}, "
+        + f"rank = {dist.get_rank()}, backend={dist.get_backend()}, "
+        + f"port = {os.environ['MASTER_PORT']} \n",
+        end="",
+    )
+
+    return dist.get_rank(), dist.get_world_size()
+
+
+def initialize_training(rank):
+    """
+    Load hyperparams; initiate wandb logging; create log directory
+    """
     if args.load_dir and os.path.exists(args.load_dir):
-        with open(os.path.join(args.load_dir, 'config.json'), 'r', encoding="utf-8") as config_json:
-            hyperparams = json.load(config_json)
-        print(f"Loaded hyperparams of the pretrained model from {args.load_dir}")
+        cfg_path = os.path.join(args.load_dir, 'config.json')
     else:
-        if not os.path.exists(args.conf):
-            raise ValueError(f"Config json at {args.conf} not found!")
-        with open(args.conf, "r", encoding="utf-8") as conf_json:
-            hyperparams = json.load(conf_json)
-
-    # Add hyperparams from arguments
+        cfg_path = args.conf
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        hyperparams = json.load(f)
     hyperparams.update({k: v for k, v in vars(args).items() if v is not None})
-    hyperparams["edge_encoding"] = not args.no_edge_encoding
-    if args.learning_rate is not None:
-        hyperparams["learning_rate"] = args.learning_rate
+    hyperparams['edge_encoding'] = not args.no_edge_encoding
+    # scale learning rate
+    world_size = dist.get_world_size()
+    hyperparams['learning_rate'] *= world_size
 
-    # Distributed LR Scaling
-    hyperparams["learning_rate"] *= dist.get_world_size()
+    # init wandb if needed
+    if rank == 0 and not hyperparams.get('debug', False):
+        if "eupeds" in hyperparams["train_data"]:
+            train_scene = hyperparams["train_data"].split("-")[0][len("eupeds_") :]
+        else:
+            train_scene = hyperparams["train_data"][:4]
+        #######################################################################
+        # Make sure to specify your desired project and entity names if needed!
+        run = wandb.init(
+            project="free-space-predictor",
+            entity="shaikh18-purdue-university",
+            name=hyperparams["log_tag"],
+            notes=f"{train_scene}",
+            job_type="train",
+            group=hyperparams["train_data"],
+            config=hyperparams,
+        )
+        #######################################################################
+        hyperparams = run.config
 
+    # create log and model directory
+    log_writer = None
+    model_dir = None
+    if not hyperparams["debug"]:
+        model_dir_subfolder = hyperparams["log_tag"] + time.strftime(
+            "-%d_%b_%Y_%H_%M_%S", time.localtime()
+        )
+        model_dir = os.path.join(hyperparams["log_dir"], model_dir_subfolder)
+
+        if rank == 0:
+            pathlib.Path(model_dir).mkdir(parents=True, exist_ok=True)
+
+            # Save config to model directory
+            with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as conf_json:
+                json.dump(hyperparams.as_dict(), conf_json)
+
+            log_writer = run
+
+        print("model_dir:", model_dir_subfolder)
+
+    return hyperparams, log_writer, model_dir
+
+
+def print_params(hyperparams) -> None:
+    """Print important parameters"""
     print("-----------------------")
     print("| TRAINING PARAMETERS |")
     print("-----------------------")
-    print("| Max History: %ss" % hyperparams["history_sec"])
-    print("| Max Future: %ss" % hyperparams["prediction_sec"])
-    print("| Batch Size: %d" % hyperparams["batch_size"])
-    print("| Eval Batch Size: %d" % hyperparams["eval_batch_size"])
-    print("| Device: %s" % hyperparams["device"])
-    print("| Learning Rate: %s" % hyperparams["learning_rate"])
-    print("| Learning Rate Step Every: %s" % hyperparams["lr_step"])
-    print("| Preprocess Workers: %s" % hyperparams["preprocess_workers"])
-    print("| Robot Future: %s" % hyperparams["incl_robot_node"])
-    print("| Map Encoding: %s" % hyperparams["map_encoding"])
-    print("| Added Input Noise: %.2f" % hyperparams["augment_input_noise"])
-    print("| Overall GMM Components: %d" % hyperparams["K"])
+    print(f"| Max History: {hyperparams['history_sec']}s")
+    print(f"| Max Future: {hyperparams['prediction_sec']}s")
+    print(f"| Batch Size: {hyperparams['batch_size']}")
+    print(f"| Eval Batch Size: {hyperparams['eval_batch_size']}")
+    print(f"| Device: {hyperparams['device']}")
+    print(f"| Learning Rate: {hyperparams['learning_rate']}")
+    print(f"| Learning Rate Step Every: {hyperparams['lr_step']}")
+    print(f"| Preprocess Workers: {hyperparams['preprocess_workers']}")
+    print(f"| Robot Future: {hyperparams['incl_robot_node']}")
+    print(f"| Map Encoding: {hyperparams['map_encoding']}")
+    print(f"| Added Input Noise: {hyperparams['augment_input_noise']:.2f}")
+    print(f"| Overall GMM Components: {hyperparams['K']}")
     print("-----------------------")
 
-    ## Load training and evaluation environments and scenes
-    desired_data=[
-        "eupeds_eth-train",
-    ]
-    data_dirs = {
-        "eupeds_eth": "./data/pedestrian_datasets/eth_ucy_peds",
-    }
 
-    attention_radius = defaultdict(
-        lambda: 20.0
-    )  # Default range is 20m unless otherwise specified.
+
+def build_datasets_and_loaders(hyperparams, rank, world_size):
+    ''' Load training and evaluation environments and scenes '''
+    # set up data dirs and parameters
+    data_dirs = {
+        "eupeds_eth": "~/Projects/trajectron/datasets/eth_ucy_peds",
+    }
+    attention_radius = defaultdict(lambda: 20.0)
     attention_radius[(AgentType.PEDESTRIAN, AgentType.PEDESTRIAN)] = 10.0
 
-    augmentations = list()
-    if hyperparams["augment_input_noise"] > 0.0:
-        augmentations.append(NoiseHistories(stddev=hyperparams["augment_input_noise"]))
+    augmentations = []
+    if hyperparams['augment_input_noise'] > 0.0:
+        augmentations.append(NoiseHistories(stddev=hyperparams['augment_input_noise']))
 
-    #TODO: understand
     map_params = {"px_per_m": 2, "map_size_px": 100, "offset_frac_xy": (-0.75, 0.0)}
 
-    train_dataset = UnifiedDataset(
-        desired_data=desired_data,
+    train_ds = UnifiedDataset(
+        desired_data=[
+            "eupeds_eth-train",
+        ],
         history_sec=(0.1, hyperparams["history_sec"]),
         future_sec=(0.1, hyperparams["prediction_sec"]),
         agent_interaction_distances=attention_radius,
@@ -130,14 +202,17 @@ def train(rank, args):
         data_dirs=data_dirs,
         verbose=True,
     )
-
+    # TODO: For nuScenes dataset
+    # if hyperparams["train_data"] == "nusc_trainval-train":
+    #     restrict_to_predchal(train_dataset, "train")
     train_sampler = data.distributed.DistributedSampler(
-        train_dataset, num_replicas=dist.get_world_size(), rank=rank
+        train_ds,
+        num_replicas=world_size,
+        rank=rank
     )
-
-    train_dataloader = data.DataLoader(
-        train_dataset,
-        collate_fn=train_dataset.get_collate_fn(pad_format="right"),
+    train_loader = data.DataLoader(
+        train_ds,
+        collate_fn=train_ds.get_collate_fn(pad_format="right"),
         pin_memory=False if hyperparams["device"] == "cpu" else True,
         batch_size=hyperparams["batch_size"],
         shuffle=False,
@@ -145,8 +220,10 @@ def train(rank, args):
         sampler=train_sampler,
     )
 
-    eval_dataset = UnifiedDataset(
-        desired_data=desired_data,
+    eval_ds = UnifiedDataset(
+        desired_data=[
+            "eupeds_eth-val",
+        ],
         history_sec=(hyperparams["history_sec"], hyperparams["history_sec"]),
         future_sec=(hyperparams["prediction_sec"], hyperparams["prediction_sec"]),
         agent_interaction_distances=attention_radius,
@@ -160,14 +237,13 @@ def train(rank, args):
         data_dirs=data_dirs,
         verbose=True,
     )
-
-    eval_sampler = data.distributed.DistributedSampler(
-        eval_dataset, num_replicas=dist.get_world_size(), rank=rank
-    )
-
-    eval_dataloader = data.DataLoader(
-        eval_dataset,
-        collate_fn=eval_dataset.get_collate_fn(pad_format="right"),
+    # TODO: For nuScenes dataset
+    # if hyperparams["eval_data"] == "nusc_trainval-train_val":
+    #     restrict_to_predchal(eval_dataset, "train_val")
+    eval_sampler = data.distributed.DistributedSampler(eval_ds, num_replicas=world_size, rank=rank)
+    eval_loader = data.DataLoader(
+        eval_ds,
+        collate_fn=eval_ds.get_collate_fn(pad_format="right"),
         pin_memory=False if hyperparams["device"] == "cpu" else True,
         batch_size=hyperparams["eval_batch_size"],
         shuffle=False,
@@ -175,94 +251,29 @@ def train(rank, args):
         sampler=eval_sampler,
     )
 
-    ######## WandB Logging ########
+    return train_sampler, train_loader, eval_loader
 
-    if rank == 0 and not hyperparams["debug"]:
-        train_scene = "_".join(
-            data_id.split("-", maxsplit=1)[0][len("eupeds_") :] for data_id in desired_data
-        )
 
-        #######################################################################
-        # Make sure to specify your desired project and entity names if needed!
-        run = wandb.init(
-            project="adaptive-trajectron-plus-plus",
-            entity="shaikh18-purdue-university",
-            name=hyperparams["train_data"],
-            notes=f"Trajectron++ w/ SNCE, {train_scene}",
-            job_type="train",
-            group=hyperparams["train_data"],
-            config=hyperparams,
-        )
-        #######################################################################
-
-        hyperparams = run.config
-
-        #################################
-
-    log_writer = None
-    model_dir = None
-    if not hyperparams["debug"]:
-        if hyperparams["load_dir"] and os.path.exists(hyperparams["load_dir"]):
-            model_dir = hyperparams["load_dir"]
-        else:
-            # Create the log and model directory if they're not present.
-            log_data = "_".join(data_id[len("eupeds_") :] for data_id in desired_data)
-            model_dir_subfolder = log_data + time.strftime(
-                "-%d_%b_%Y_%H_%M_%S", time.localtime()
-            )
-            model_dir = os.path.join(hyperparams["log_dir"], model_dir_subfolder)
-
-            if rank == 0:
-                pathlib.Path(model_dir).mkdir(parents=True, exist_ok=True)
-
-                # Save config to model directory
-                with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as conf_json:
-                    json.dump(hyperparams.as_dict(), conf_json)
-
-                log_writer = run
-
-            print("Sub-Directory of model being trained:", model_dir_subfolder)
-
-    model_registrar = ModelRegistrar(model_dir, hyperparams["device"])
-
-    ########### Social NCE ###########
-
-    print('contrastive_sampling:', hyperparams["contrastive_sampling"])
-    # TODO: simpler intantiation for SNCE
-    head_projection = ProjHead(feat_dim=128, hidden_dim=32, head_dim=8).to(hyperparams["device"])
-    encoder_sample = EventEncoder(hidden_dim=8, head_dim=8).to(hyperparams["device"])
-    snce = SocialNCE(
-        head_projection=head_projection,
-        encoder_sample=encoder_sample,
-        sampling=hyperparams["constrastive_sampling"]
-    )
-
-    #####################################
-
-    # TODO: check if the loaded pre-trained model contains SNCE's projection head and encoder sampler
-
-    trajectron = Trajectron(
-        model_registrar, hyperparams, log_writer, hyperparams["device"]
-    )
-
-    # TODO: combine SNCE with Trajectron++ model (i.e., include with the model registrar)
-    trajectron.set_environment(snce=snce)
-    trajectron.set_all_annealing_params()
-
+def init_model_and_optimizer(hyperparams, log_writer, device, model_dir):
+    """Initiate model and optimizers"""
+    model_registrar = ModelRegistrar(model_dir, device)
+    fsp = TrajectoryPredictor(model_registrar, hyperparams, log_writer, device)
+    fsp.set_environment()
+    fsp.set_all_annealing_params()
+    # optionally wrap in DDP
     if torch.cuda.is_available():
-        trajectron = DDP(
-            trajectron,
-            device_ids=[rank],
-            output_device=rank,
+        fsp = DDP(
+            fsp,
+            device_ids=[device.index],
+            output_device=device.index,
             find_unused_parameters=True,
         )
-        trajectron_module = trajectron.module
+        fsp_module = fsp.module
     else:
-        trajectron_module = trajectron
-
+        fsp_module = fsp
+    # set optimizers and schedulers
     lr_scheduler = None
     step_scheduler = None
-    # TODO: define a different set of optimization parameter if updating pre-trined model
     optimizer = optim.Adam(
         [
             {
@@ -274,12 +285,6 @@ def train(rank, args):
                 "params": model_registrar.get_name_match("map_encoder").parameters(),
                 "lr": hyperparams["map_enc_learning_rate"],
             },
-            {
-                "params": head_projection.parameters(),
-            },
-            {
-                "params": encoder_sample.parameters(),
-            }
         ],
         lr=hyperparams["learning_rate"],
     )
@@ -290,210 +295,160 @@ def train(rank, args):
         lr_scheduler = optim.lr_scheduler.ExponentialLR(
             optimizer, gamma=hyperparams["learning_decay_rate"]
         )
-
     if hyperparams["lr_step"] != 0:
         step_scheduler = optim.lr_scheduler.StepLR(
             optimizer, step_size=hyperparams["lr_step"], gamma=0.1
         )
+    return fsp, fsp_module, model_registrar, optimizer, lr_scheduler, step_scheduler
 
-    # TODO: is this required?
-    # if rank == 0 and not hyperparams['debug']:
-    #     log_writer.watch(trajectron, log="all", log_freq=500)
 
-    #################################
-    #           TRAINING            #
-    #################################
-    curr_iter: int = 0
-    for epoch in range(1, hyperparams["train_epochs"] + 1):
-        train_sampler.set_epoch(epoch)
-        pbar = tqdm(
-            train_dataloader,
+def train(
+        model: TrajectoryPredictor,
+        module: DDP,
+        batch: AgentBatch,
+        optimizer,
+    ):
+    """Backpropagation"""
+    module.step_annealers()
+    optimizer.zero_grad(set_to_none=True)
+    train_loss, loss_task, loss_nce = model(batch)
+    print(
+        f"Total Loss: {train_loss.detach().item():.4f}, " +
+        f"Task Loss: {loss_task.item():.4f}, " +
+        f"SNCE Loss: {loss_nce.item():.4f}"
+    )
+    train_loss.backward()
+    optimizer.step()
+    return train_loss
+
+
+def evaluate(model, loader, rank, log_writer, epoch, curr_iter):
+    """Evaluate model"""
+    with torch.no_grad():
+        # Calculate evaluation loss
+        eval_perf = defaultdict(lambda: defaultdict(list))
+
+        batch: AgentBatch
+        for batch in tqdm(
+            loader,
             ncols=80,
             unit_scale=dist.get_world_size(),
             disable=(rank > 0),
-        )
-
-        #TODO: do we need this profiler?
-        # prof = torch.profiler.profile(
-        #     schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-        #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler/tpp_unified'),
-        #     record_shapes=True,
-        #     profile_memory=True,
-        #     with_stack=True
-        # )
-        # prof.start()
-
-        # initialize the timer for the 1st iteration
-        step_timer_start = time.time()
-
-        batch: AgentBatch
-        for batch_idx, batch in enumerate(pbar):
-            # if batch_idx >= (1 + 1 + 3) * 2:
-            #     break
-
-            trajectron.curr_iter = curr_iter
-            trajectron_module.step_all_annealers()
-
-            optimizer.zero_grad(set_to_none=True)
-
-            train_loss, loss_task, loss_nce = trajectron(batch)
-
-            pbar.set_description(f"Epoch {epoch}, Total Loss: {train_loss.detach().item():.4f}, Task Loss: {loss_task.item():.4f}, SNCE Loss: {loss_nce.item():.4f}")
-
-            train_loss.backward()
-
-            # Clipping gradients.
-            if hyperparams["grad_clip"] is not None:
-                nn.utils.clip_grad_value_(
-                    model_registrar.parameters(), hyperparams["grad_clip"]
-                )
-
-            optimizer.step()
-
-            # Stepping forward the learning rate scheduler and annealers.
-            lr_scheduler.step()
-            if rank == 0 and not hyperparams["debug"]:
-                step_timer_stop = time.time()
-                elapsed = step_timer_stop - step_timer_start
-
-                log_writer.log(
-                    {
-                        "train/learning_rate": lr_scheduler.get_last_lr()[0],
-                        "train/loss": train_loss.detach().item(),
-                        "train/loss_task": loss_task.detach().item(),
-                        "train/loss_nce": loss_nce.detach().item(),
-                        "steps_per_sec": 1 / elapsed,
-                        "epoch": epoch,
-                        "batch": batch_idx,
-                    },
-                    step=curr_iter,
-                )
-
-            curr_iter += 1
-
-            # initialize the timer for the following iteration
-            step_timer_start = time.time()
-
-            # prof.step()
-
-        # prof.stop()
-        # raise
-        if hyperparams["lr_step"] != 0:
-            step_scheduler.step()
-
-        #################################
-        #           EVALUATION          #
-        #################################
-        if (
-            hyperparams["eval_every"] is not None
-            and not hyperparams["debug"]
-            and epoch % hyperparams["eval_every"] == 0
-            and epoch > 0
+            desc=f"Epoch {epoch} Eval",
         ):
-            with torch.no_grad():
-                # Calculate evaluation loss
-                eval_perf = defaultdict(lambda: defaultdict(list))
+            results: Dict[AgentType, Dict[str, torch.Tensor]]
+            results = model.predict_and_evaluate_batch(batch)
+            for agent_type, metric_dict in results.items():
+                for metric, values in metric_dict.items():
+                    eval_perf[agent_type][metric].append(values.cpu().numpy())
 
-                batch: AgentBatch
-                for batch in tqdm(
-                    eval_dataloader,
-                    ncols=80,
-                    unit_scale=dist.get_world_size(),
-                    disable=(rank > 0),
-                    desc=f"Epoch {epoch} Eval",
-                ):
-                    eval_results: Dict[
-                        AgentType, Dict[str, torch.Tensor]
-                    ] = trajectron_module.predict_and_evaluate_batch(
-                        batch, update_mode=UpdateMode.BATCH_FROM_PRIOR
-                    )
-                    for agent_type, metric_dict in eval_results.items():
-                        for metric, values in metric_dict.items():
-                            eval_perf[agent_type][metric].append(values.cpu().numpy())
+        if torch.cuda.is_available() and dist.get_world_size() > 1:
+            gathered_values = all_gather(eval_perf)
+            if rank == 0:
+                eval_perf = []
+                for eval_dicts in gathered_values:
+                    eval_perf.extend(eval_dicts)
 
-                if torch.cuda.is_available() and dist.get_world_size() > 1:
-                    gathered_values = all_gather(eval_perf)
-                    if rank == 0:
-                        eval_perf = []
-                        for eval_dicts in gathered_values:
-                            eval_perf.extend(eval_dicts)
-
-                if rank == 0:
-                    evaluation.log_batch_errors(
-                        eval_perf,
-                        [
-                            "ml_ade",
-                            "ml_fde",
-                            "min_ade_5",
-                            "min_ade_10",
-                            "nll_mean",
-                            "nll_final",
-                        ],
-                        log_writer,
-                        "eval",
-                        epoch,
-                        curr_iter,
-                    )
-
-                    ####################################
-                    #           VIZUALIZATION          #
-                    ####################################
-                    # import matplotlib.pyplot as plt
-
-                    # batch_idxs = random.sample(range(len(eval_dataset)), 5)
-                    # batch: AgentBatch = eval_dataset.get_collate_fn(pad_format="right")(
-                    #     [eval_dataset[i] for i in batch_idxs]
-                    # )
-                    # pred_dists, _ = trajectron_module.predict(
-                    #     batch,
-                    #     update_mode=UpdateMode.BATCH_FROM_PRIOR
-                    # )
-                    # batch.to("cpu")
-
-                    # images = list()
-                    # for i in trange(len(batch_idxs), desc="Visualizing Random Predictions"):
-                    #     try:
-                    #         fig, ax = plt.subplots()
-                    #         trajdata_vis.plot_agent_batch(batch, batch_idx=i, ax=ax, show=False, close=False)
-                    #         visualization.visualize_distribution(ax, pred_dists, batch_idx=i)
-
-                    #         images.append(wandb.Image(
-                    #             fig,
-                    #             caption=f"{str(AgentType(batch.agent_type[i].item()))}/{batch.agent_name[i]}"
-                    #         ))
-                    #     except:
-                    #         continue
-
-                    # log_writer.log({f"eval/predictions_viz": images}, step=curr_iter)
-                    # plt.close("all")
-
-        if rank == 0 and (
-            hyperparams["save_every"] is not None
-            and hyperparams["debug"] is False
-            and epoch % hyperparams["save_every"] == 0
-        ):
-            save_checkpoint(
-                model_registrar.model_dir,
-                trajectron_module,
-                optimizer,
-                lr_scheduler,
-                step_scheduler,
+        if rank == 0:
+            evaluation.log_batch_errors(
+                eval_perf,
+                [
+                    "ml_ade",
+                    "ml_fde",
+                    "min_ade_5",
+                    "min_ade_10",
+                    "nll_mean",
+                    "nll_final",
+                ],
+                log_writer,
+                "eval",
                 epoch,
+                curr_iter,
             )
 
-        # Waiting for process 0 to be done its evaluation and visualization.
-        if torch.cuda.is_available():
-            dist.barrier()
+# def evaluate_and_visualize(model, loader, rank, log_writer, epoch, curr_iter):
+#     """Evaluate and visualize model"""
+#     with torch.no_grad():
+#         # Calculate evaluation loss
+#         eval_perf = defaultdict(lambda: defaultdict(list))
+
+#         batch: AgentBatch
+#         for batch in tqdm(
+#             loader,
+#             ncols=80,
+#             unit_scale=dist.get_world_size(),
+#             disable=(rank > 0),
+#             desc=f"Epoch {epoch} Eval",
+#         ):
+#             results: Dict[AgentType, Dict[str, torch.Tensor]]
+#             results = model.predict_and_evaluate_batch(batch)
+#             for agent_type, metric_dict in results.items():
+#                 for metric, values in metric_dict.items():
+#                     eval_perf[agent_type][metric].append(values.cpu().numpy())
+
+#         if torch.cuda.is_available() and dist.get_world_size() > 1:
+#             gathered_values = all_gather(eval_perf)
+#             if rank == 0:
+#                 eval_perf = []
+#                 for eval_dicts in gathered_values:
+#                     eval_perf.extend(eval_dicts)
+
+#         if rank == 0:
+#             evaluation.log_batch_errors(
+#                 eval_perf,
+#                 [
+#                     "ml_ade",
+#                     "ml_fde",
+#                     "min_ade_5",
+#                     "min_ade_10",
+#                     "nll_mean",
+#                     "nll_final",
+#                 ],
+#                 log_writer,
+#                 "eval",
+#                 epoch,
+#                 curr_iter,
+#             )
+
+#             import matplotlib.pyplot as plt
+
+#             batch_idxs = random.sample(range(len(eval_dataset)), 5)
+#             batch: AgentBatch = eval_dataset.get_collate_fn(pad_format="right")(
+#                 [eval_dataset[i] for i in batch_idxs]
+#             )
+#             pred_dists, _ = module.predict(
+#                 batch,
+#                 update_mode=UpdateMode.BATCH_FROM_PRIOR
+#             )
+#             batch.to("cpu")
+
+#             images = list()
+#             for i in trange(len(batch_idxs), desc="Visualizing Random Predictions"):
+#                 try:
+#                     fig, ax = plt.subplots()
+#                     trajdata_vis.plot_agent_batch(batch, batch_idx=i, ax=ax, show=False, close=False)
+#                     visualization.visualize_distribution(ax, pred_dists, batch_idx=i)
+
+#                     images.append(wandb.Image(
+#                         fig,
+#                         caption=f"{str(AgentType(batch.agent_type[i].item()))}/{batch.agent_name[i]}"
+#                     ))
+#                 except:
+#                     continue
+
+#             log_writer.log({f"eval/predictions_viz": images}, step=curr_iter)
+#             plt.close("all")
 
 
 def save_checkpoint(
     save_dir: str,
-    model: Trajectron,
+    model: TrajectoryPredictor,
     optimizer: optim.Optimizer,
     lr_scheduler: Optional[optim.lr_scheduler._LRScheduler],
     step_scheduler: Optional[optim.lr_scheduler.StepLR],
     epoch: int,
 ) -> None:
+    """Save model checkpoint"""
     save_path = pathlib.Path(save_dir) / f"model_registrar-{epoch}.pt"
 
     torch.save(
@@ -512,24 +467,102 @@ def save_checkpoint(
     )
 
 
-def spmd_main(local_rank):
-    if torch.cuda.is_available():
-        backend = "nccl"
-    else:
-        backend = "gloo"
+def main():
+    """Main function"""
+    rank, world_size = init_distributed()
+    device = get_device(rank)
+    set_seed(args.seed)
+    hyperparams, log_writer, model_dir = initialize_training(rank)
+    print_params(hyperparams)
 
-    dist.init_process_group(backend=backend)
+    (train_sampler,
+     train_loader,
+     eval_loader) = build_datasets_and_loaders(hyperparams, rank, world_size)
 
-    print(
-        f"[{os.getpid()}]: world_size = {dist.get_world_size()}, "
-        + f"rank = {dist.get_rank()}, backend={dist.get_backend()}, "
-        + f"port = {os.environ['MASTER_PORT']} \n",
-        end="",
-    )
+    (model,
+     module,
+     registrar,
+     optimizer,
+     lr_scheduler,
+     step_scheduler) = init_model_and_optimizer(
+        hyperparams, log_writer, device, model_dir)
 
-    train(local_rank, args)
+    curr_iter: int = 0
+    for epoch in range(1, hyperparams['train_epochs'] + 1):
+        #################################
+        #           TRAINING            #
+        #################################
+        train_sampler.set_epoch(epoch)
+        pbar = tqdm(
+            train_loader,
+            ncols=80,
+            unit_scale=dist.get_world_size(),
+            disable=(rank > 0),
+        )
+        # initialize the timer for the 1st iteration
+        step_timer_start = time.time()
+
+        batch: AgentBatch
+        for batch_idx, batch in enumerate(pbar):
+            module.set_curr_iter(curr_iter)
+            train_loss = train(model, module, batch, optimizer)
+
+            # Stepping forward the learning rate scheduler and annealers.
+            lr_scheduler.step()
+            if rank == 0 and not hyperparams["debug"]:
+                step_timer_stop = time.time()
+                elapsed = step_timer_stop - step_timer_start
+
+                log_writer.log(
+                    {
+                        "train/learning_rate": lr_scheduler.get_last_lr()[0],
+                        "train/loss": train_loss.detach().item(),
+                        "steps_per_sec": 1 / elapsed,
+                        "epoch": epoch,
+                        "batch": batch_idx,
+                    },
+                    step=curr_iter,
+                )
+
+            curr_iter += 1
+            # initialize the timer for the following iteration
+            step_timer_start = time.time()
+
+        if hyperparams["lr_step"] != 0:
+            step_scheduler.step()
+
+        #################################
+        #           EVALUATION          #
+        #################################
+        if (
+            hyperparams["eval_every"] is not None
+            and not hyperparams["debug"]
+            and epoch % hyperparams["eval_every"] == 0
+            and epoch > 0
+        ):
+            evaluate(model, eval_loader, rank, log_writer, epoch, curr_iter)
+
+        #################################
+        #          CHECKPOINT           #
+        #################################
+        if rank == 0 and (
+            hyperparams["save_every"] is not None
+            and hyperparams["debug"] is False
+            and epoch % hyperparams["save_every"] == 0
+        ):
+            save_checkpoint(
+                registrar.model_dir,
+                module,
+                optimizer,
+                lr_scheduler,
+                step_scheduler,
+                epoch,
+            )
+
+        # Waiting for process 0 to be done its evaluation and visualization.
+        if torch.cuda.is_available():
+            dist.barrier()
 
 
-if __name__ == "__main__":
-    local_rank = int(os.environ["LOCAL_RANK"])
-    spmd_main(local_rank)
+if __name__ == '__main__':
+    main()
