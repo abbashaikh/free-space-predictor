@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from trajdata import AgentBatch, AgentType
 
+
 class SupportPredictor:
     """
     Class to predict the support of a given scenorio
@@ -17,6 +18,8 @@ class SupportPredictor:
 
         Parameters:
         - data: Input data for prediction.
+
+
 
         Returns:
         - Predicted support values.
