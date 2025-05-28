@@ -169,7 +169,7 @@ def build_datasets_and_loaders(hyperparams, rank, world_size):
     ''' Load training and evaluation environments and scenes '''
     # set up data dirs and parameters
     data_dirs = {
-        "eupeds_eth": "~/Projects/trajectron/datasets/eth_ucy_peds",
+        "eupeds_eth": "./data/pedestrian_datasets/eth_ucy_peds",
     }
     attention_radius = defaultdict(lambda: 20.0)
     attention_radius[(AgentType.PEDESTRIAN, AgentType.PEDESTRIAN)] = 10.0

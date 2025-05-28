@@ -6,7 +6,7 @@ torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
         --eval_batch_size=256 \
         --preprocess_workers=16 \
         --log_dir=./data/trained_models/trajectory_prediction \
-        --train_epochs=15 \
+        --train_epochs=1 \
         --conf=./config/pedestrians.json \
         --trajdata_cache_dir=./data/pedestrian_datasets/.unified_data_cache \
         --history_sec=2.8 --prediction_sec=4.8 \
