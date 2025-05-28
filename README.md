@@ -19,8 +19,10 @@ pip install --no-dependencies l5kit==1.5.0
 ```
 
 ### Local Packages ###
-From the root directory run
+From the package's root directory run
 ```sh
 pip install -e .
 ```
+
+<!-- CUDA Toolkit with pytorch -->
 

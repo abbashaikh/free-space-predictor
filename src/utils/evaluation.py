@@ -23,8 +23,8 @@ from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import binary_dilation
 from scipy.stats import gaussian_kde
 
-import visualization as visualization
-from utils import prediction_output_to_trajectories
+from utils.visualization_utils import plot_barplots, plot_boxplots
+from utils.trajectory_utils import prediction_output_to_trajectories
 
 
 def compute_ade_pt(predicted_trajs, gt_traj):
@@ -266,7 +266,7 @@ def log_batch_errors(
                         metric: metric_batch_error,
                     }
                     kde_barplot_fig, ax = plt.subplots(figsize=(5, 5))
-                    visualization.visualization_utils.plot_barplots(
+                    plot_barplots(
                         ax, pd, "dataset", metric
                     )
                     log_writer.add_figure(
@@ -281,7 +281,7 @@ def log_batch_errors(
                         metric: metric_batch_error,
                     }
                     fig, ax = plt.subplots(figsize=(5, 5))
-                    visualization.visualization_utils.plot_boxplots(
+                    plot_boxplots(
                         ax, mse_fde_pd, "dataset", metric
                     )
                     log_writer.add_figure(

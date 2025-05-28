@@ -858,7 +858,12 @@ class MultimodalGenerativeCVAE(nn.Module):
 
         enc, x_nr_t, _, y_r, _ = self.obtain_encoded_tensors(mode, batch)
 
-        self.latent.p_dist = self.p_z_x(mode, enc)
+        self.latent.p_dist = self.latent.dist_from_h(
+            self.node_modules[self.node_type + "/p_z_x"](
+                self.hyperparams, mode, enc
+            ),
+            mode
+        )
 
         z, num_samples, num_components = self.latent.sample_p(
             num_samples,

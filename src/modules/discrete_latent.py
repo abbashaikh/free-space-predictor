@@ -50,7 +50,7 @@ class DiscreteLatent(object):
         )
         if self.z_logit_clip is not None and mode == ModeKeys.TRAIN:
             c = self.z_logit_clip
-            logits = torch.clamp(logits_separated_mean_zero, min=-c, max=c)
+            logits = torch.clamp(logits_separated_mean_zero, min=0-c, max=c)
         else:
             logits = logits_separated_mean_zero
 

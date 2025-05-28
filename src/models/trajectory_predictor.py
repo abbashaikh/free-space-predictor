@@ -1,3 +1,4 @@
+"""Main trajectory predictor class"""
 from itertools import product
 from typing import Any, Dict, List, Union
 
@@ -8,8 +9,8 @@ from trajdata import AgentBatch, AgentType
 
 from modules.mgcvae import MultimodalGenerativeCVAE
 from modules.snce import SocialNCE
-from utils.annealing import *
-from utils.sc_sampling import EventSampler
+from utils.evaluation import compute_batch_statistics_pt
+from utils.annealing import step_annealers, set_annealing_params
 
 class TrajectoryPredictor(nn.Module):
     """
@@ -69,7 +70,7 @@ class TrajectoryPredictor(nn.Module):
             snce_head_dim=self.hyperparams["snce_head_dim"],
             hyperparams=self.hyperparams,
             device=self.device
-        ).to(self.device)
+        )
         self.node_models_dict["snce"] = self.model_registrar.get_model("snce", snce)
 
     @property
@@ -80,8 +81,9 @@ class TrajectoryPredictor(nn.Module):
     @curr_iter.setter
     def curr_iter(self, value):
         self._curr_iter = value
-        for model in self.node_models_dict.values():
-            model.curr_iter = value
+        for name, model in self.node_models_dict.items():
+            if name != "snce":
+                model.curr_iter = value
 
     def set_all_annealing_params(self):
         """Set the annealing parameters for all models in the predictor"""
@@ -117,7 +119,7 @@ class TrajectoryPredictor(nn.Module):
             # Social NCE loss
             snce_model: SocialNCE = self.node_models_dict["snce"]
             if self.hyperparams['contrastive_weight'] > 0:
-                loss_nce = snce_model.loss(enc, batch)
+                loss_nce = snce_model(enc, batch)
                 losses.append(loss_mgcvae + loss_nce * self.hyperparams["contrastive_weight"])
             else:
                 loss_nce = torch.tensor([0.0])
