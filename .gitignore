@@ -245,6 +245,9 @@ pythontex-files-*/
 TSWLatexianTemp*
 
 ## Editors:
+# VSCode
+.vscode/
+
 # WinEdt
 *.bak
 *.sav
@@ -409,3 +412,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Ignore all files under the unified_data_cache folder
+/data/pedestrian_datasets/.unified_data_cache/
