@@ -81,11 +81,15 @@ class SocialNCE(nn.Module):
         )
         # nce
         self.temperature = temperature
-        self.criterion = nn.CrossEntropyLoss(reduction='none')
+        self.criterion = nn.CrossEntropyLoss()
         # sampling
         self.horizon = horizon
         self.sampler = EventSampler(device=self.device)
-
+    
+    def forward(self, enc, batch):
+        """Forward pass of Social NCE"""
+        return self.loss(enc, batch)
+    
     def loss(self, feat, batch: AgentBatch):
         '''
         Social NCE Loss
@@ -95,13 +99,9 @@ class SocialNCE(nn.Module):
 
         # Q = max_neighbors*zone_size (to track tensor size)
 
-        (sample_pos,
-         sample_neg,
-         mask_valid_pos,
+        (candidate_pos,
+         candidate_neg,
          mask_valid_neg) = self.sampler.social_sampling(batch, self.horizon)
-
-        candidate_pos = sample_pos[:, :self.horizon]
-        candidate_neg = sample_neg[:, :, :self.horizon]
 
         # temporal (normalized time steps)
         time_pos = (torch.ones(candidate_pos.size(0))[:, None]
@@ -112,17 +112,16 @@ class SocialNCE(nn.Module):
         ).to(candidate_neg.device) / self.horizon
 
         # embedding
-        emb_obsv = self.head_projection(feat) #TODO: feat.shape == [bs, x_size]?
+        emb_obsv = self.head_projection(feat)
         emb_pos = self.encoder_sample(candidate_pos, time_pos[:, :, None])
         emb_neg = self.encoder_sample(candidate_neg, time_neg[:, :, :, None])
 
         # normalization
-        query = nn.functional.normalize(emb_obsv, dim=-1)   # [bs, x_size]?
-        key_pos = nn.functional.normalize(emb_pos, dim=-1)  # [bs, horizon, head_dim] 
+        query = nn.functional.normalize(emb_obsv, dim=-1)   # [bs, x_size]
+        key_pos = nn.functional.normalize(emb_pos, dim=-1)  # [bs, horizon, head_dim]
         key_neg = nn.functional.normalize(emb_neg, dim=-1)  # [bs, Q, horizon, head_dim]
 
         # similarity
-        #TODO: verify dimensions of query (from dimensions of feat)
         sim_pos = (query.unsqueeze(1) * key_pos).sum(dim=-1)                # [bs, horizon]
         sim_neg = (query.unsqueeze(1).unsqueeze(2) * key_neg).sum(dim=-1)   # [bs, Q, horizon]
 
@@ -139,8 +138,8 @@ class SocialNCE(nn.Module):
         # loss
         labels = torch.zeros(logits.size(
             0), dtype=torch.long, device=logits.device)
-        loss_per_sample = self.criterion(logits, labels)
-        loss = (loss_per_sample[mask_valid_pos]).sum() / mask_valid_pos.sum()
+
+        loss = self.criterion(logits, labels)
 
         return loss
 

@@ -18,17 +18,16 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils import data
 from tqdm import tqdm
-import wandb
-
 from trajdata import AgentType, UnifiedDataset
 from trajdata.augmentation import NoiseHistories
 from trajdata.data_structures.batch import AgentBatch
+import wandb
 
-from utils import evaluation
-from utils import visualization
-from utils.argument_parser import args
 from modules.model_registrar import ModelRegistrar
 from models.trajectory_predictor import TrajectoryPredictor
+from utils import evaluation
+# from utils import visualization_utils
+from utils.argument_parser import args
 from utils.comm import all_gather
 
 # TODO: For nuScenes dataset
@@ -89,20 +88,18 @@ def init_distributed():
     return dist.get_rank(), dist.get_world_size()
 
 
-def initialize_training(rank):
+def initialize_training(rank, world_size):
     """
     Load hyperparams; initiate wandb logging; create log directory
     """
-    if args.load_dir and os.path.exists(args.load_dir):
-        cfg_path = os.path.join(args.load_dir, 'config.json')
-    else:
-        cfg_path = args.conf
-    with open(cfg_path, 'r', encoding='utf-8') as f:
-        hyperparams = json.load(f)
+    # Load hyperparameters from json
+    if not os.path.exists(args.conf):
+        raise ValueError(f"Config json at {args.conf} not found!")
+    with open(args.conf, "r", encoding="utf-8") as conf_json:
+        hyperparams = json.load(conf_json)
     hyperparams.update({k: v for k, v in vars(args).items() if v is not None})
     hyperparams['edge_encoding'] = not args.no_edge_encoding
     # scale learning rate
-    world_size = dist.get_world_size()
     hyperparams['learning_rate'] *= world_size
 
     # init wandb if needed
@@ -168,12 +165,11 @@ def print_params(hyperparams) -> None:
     print("-----------------------")
 
 
-
 def build_datasets_and_loaders(hyperparams, rank, world_size):
     ''' Load training and evaluation environments and scenes '''
     # set up data dirs and parameters
     data_dirs = {
-        "eupeds_eth": "~/Projects/trajectron/datasets/eth_ucy_peds",
+        "eupeds_eth": "./data/pedestrian_datasets/eth_ucy_peds",
     }
     attention_radius = defaultdict(lambda: 20.0)
     attention_radius[(AgentType.PEDESTRIAN, AgentType.PEDESTRIAN)] = 10.0
@@ -185,9 +181,7 @@ def build_datasets_and_loaders(hyperparams, rank, world_size):
     map_params = {"px_per_m": 2, "map_size_px": 100, "offset_frac_xy": (-0.75, 0.0)}
 
     train_ds = UnifiedDataset(
-        desired_data=[
-            "eupeds_eth-train",
-        ],
+        desired_data=[hyperparams["train_data"]],
         history_sec=(0.1, hyperparams["history_sec"]),
         future_sec=(0.1, hyperparams["prediction_sec"]),
         agent_interaction_distances=attention_radius,
@@ -221,9 +215,7 @@ def build_datasets_and_loaders(hyperparams, rank, world_size):
     )
 
     eval_ds = UnifiedDataset(
-        desired_data=[
-            "eupeds_eth-val",
-        ],
+        desired_data=[hyperparams["eval_data"]],
         history_sec=(hyperparams["history_sec"], hyperparams["history_sec"]),
         future_sec=(hyperparams["prediction_sec"], hyperparams["prediction_sec"]),
         agent_interaction_distances=attention_radius,
@@ -299,30 +291,75 @@ def init_model_and_optimizer(hyperparams, log_writer, device, model_dir):
         step_scheduler = optim.lr_scheduler.StepLR(
             optimizer, step_size=hyperparams["lr_step"], gamma=0.1
         )
-    return fsp, fsp_module, model_registrar, optimizer, lr_scheduler, step_scheduler
+    return fsp_module, model_registrar, optimizer, lr_scheduler, step_scheduler
 
 
-def train(
-        model: TrajectoryPredictor,
-        module: DDP,
-        batch: AgentBatch,
+def train_one_epoch(
+        hyperparams,
+        rank,
+        model,
+        dataloader,
         optimizer,
+        lr_scheduler,
+        log_writer,
+        epoch,
+        curr_iter: int,
     ):
     """Backpropagation"""
-    module.step_annealers()
-    optimizer.zero_grad(set_to_none=True)
-    train_loss, loss_task, loss_nce = model(batch)
-    print(
-        f"Total Loss: {train_loss.detach().item():.4f}, " +
-        f"Task Loss: {loss_task.item():.4f}, " +
-        f"SNCE Loss: {loss_nce.item():.4f}"
+    pbar = tqdm(
+        dataloader,
+        ncols=80,
+        unit_scale=dist.get_world_size(),
+        disable=(rank > 0),
     )
-    train_loss.backward()
-    optimizer.step()
-    return train_loss
+    # initialize the timer for the 1st iteration
+    step_timer_start = time.time()
+
+    batch: AgentBatch
+    for batch_idx, batch in enumerate(pbar):
+        # print("\n----------------------------")
+        # print(f"Batch Index: {batch_idx}")
+        model.curr_iter = curr_iter
+        model.step_all_annealers()
+        optimizer.zero_grad(set_to_none=True)
+        train_loss, loss_task, loss_nce = model(batch)
+        pbar.set_description(
+            f"Total Loss: {train_loss.detach().item():.4f}, " +
+            f"Task Loss: {loss_task.item():.4f}, " +
+            f"SNCE Loss: {loss_nce.item():.4f}"
+        )
+        train_loss.backward()
+        optimizer.step()
+
+        # Stepping forward the learning rate scheduler and annealers.
+        lr_scheduler.step()
+        if rank == 0 and not hyperparams.get("debug", False):
+            step_timer_stop = time.time()
+            elapsed = step_timer_stop - step_timer_start
+
+            log_writer.log(
+                {
+                    "train/learning_rate": lr_scheduler.get_last_lr()[0],
+                    "train/loss": train_loss.detach().item(),
+                    "steps_per_sec": 1 / elapsed,
+                    "epoch": epoch,
+                    "batch": batch_idx,
+                },
+                step=curr_iter,
+            )
+        curr_iter += 1
+        # initialize the timer for the following iteration
+        step_timer_start = time.time()
+    return curr_iter
 
 
-def evaluate(model, loader, rank, log_writer, epoch, curr_iter):
+def evaluate(
+        rank,
+        model: TrajectoryPredictor,
+        dataloader,
+        log_writer,
+        epoch,
+        curr_iter):
     """Evaluate model"""
     with torch.no_grad():
         # Calculate evaluation loss
@@ -330,7 +367,7 @@ def evaluate(model, loader, rank, log_writer, epoch, curr_iter):
 
         batch: AgentBatch
         for batch in tqdm(
-            loader,
+            dataloader,
             ncols=80,
             unit_scale=dist.get_world_size(),
             disable=(rank > 0),
@@ -366,79 +403,6 @@ def evaluate(model, loader, rank, log_writer, epoch, curr_iter):
                 curr_iter,
             )
 
-# def evaluate_and_visualize(model, loader, rank, log_writer, epoch, curr_iter):
-#     """Evaluate and visualize model"""
-#     with torch.no_grad():
-#         # Calculate evaluation loss
-#         eval_perf = defaultdict(lambda: defaultdict(list))
-
-#         batch: AgentBatch
-#         for batch in tqdm(
-#             loader,
-#             ncols=80,
-#             unit_scale=dist.get_world_size(),
-#             disable=(rank > 0),
-#             desc=f"Epoch {epoch} Eval",
-#         ):
-#             results: Dict[AgentType, Dict[str, torch.Tensor]]
-#             results = model.predict_and_evaluate_batch(batch)
-#             for agent_type, metric_dict in results.items():
-#                 for metric, values in metric_dict.items():
-#                     eval_perf[agent_type][metric].append(values.cpu().numpy())
-
-#         if torch.cuda.is_available() and dist.get_world_size() > 1:
-#             gathered_values = all_gather(eval_perf)
-#             if rank == 0:
-#                 eval_perf = []
-#                 for eval_dicts in gathered_values:
-#                     eval_perf.extend(eval_dicts)
-
-#         if rank == 0:
-#             evaluation.log_batch_errors(
-#                 eval_perf,
-#                 [
-#                     "ml_ade",
-#                     "ml_fde",
-#                     "min_ade_5",
-#                     "min_ade_10",
-#                     "nll_mean",
-#                     "nll_final",
-#                 ],
-#                 log_writer,
-#                 "eval",
-#                 epoch,
-#                 curr_iter,
-#             )
-
-#             import matplotlib.pyplot as plt
-
-#             batch_idxs = random.sample(range(len(eval_dataset)), 5)
-#             batch: AgentBatch = eval_dataset.get_collate_fn(pad_format="right")(
-#                 [eval_dataset[i] for i in batch_idxs]
-#             )
-#             pred_dists, _ = module.predict(
-#                 batch,
-#                 update_mode=UpdateMode.BATCH_FROM_PRIOR
-#             )
-#             batch.to("cpu")
-
-#             images = list()
-#             for i in trange(len(batch_idxs), desc="Visualizing Random Predictions"):
-#                 try:
-#                     fig, ax = plt.subplots()
-#                     trajdata_vis.plot_agent_batch(batch, batch_idx=i, ax=ax, show=False, close=False)
-#                     visualization.visualize_distribution(ax, pred_dists, batch_idx=i)
-
-#                     images.append(wandb.Image(
-#                         fig,
-#                         caption=f"{str(AgentType(batch.agent_type[i].item()))}/{batch.agent_name[i]}"
-#                     ))
-#                 except:
-#                     continue
-
-#             log_writer.log({f"eval/predictions_viz": images}, step=curr_iter)
-#             plt.close("all")
-
 
 def save_checkpoint(
     save_dir: str,
@@ -467,66 +431,41 @@ def save_checkpoint(
     )
 
 
-def main():
+def main(rank, world_size, device):
     """Main function"""
-    rank, world_size = init_distributed()
-    device = get_device(rank)
     set_seed(args.seed)
-    hyperparams, log_writer, model_dir = initialize_training(rank)
+    hyperparams, log_writer, model_dir = initialize_training(rank, world_size)
     print_params(hyperparams)
 
     (train_sampler,
      train_loader,
      eval_loader) = build_datasets_and_loaders(hyperparams, rank, world_size)
 
-    (model,
-     module,
+    (module,
      registrar,
      optimizer,
      lr_scheduler,
      step_scheduler) = init_model_and_optimizer(
         hyperparams, log_writer, device, model_dir)
 
+    torch.autograd.set_detect_anomaly(True)
     curr_iter: int = 0
     for epoch in range(1, hyperparams['train_epochs'] + 1):
         #################################
         #           TRAINING            #
         #################################
         train_sampler.set_epoch(epoch)
-        pbar = tqdm(
-            train_loader,
-            ncols=80,
-            unit_scale=dist.get_world_size(),
-            disable=(rank > 0),
+        curr_iter = train_one_epoch(
+            hyperparams=hyperparams,
+            rank=rank,
+            model=module,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            log_writer=log_writer,
+            epoch=epoch,
+            curr_iter=curr_iter,
         )
-        # initialize the timer for the 1st iteration
-        step_timer_start = time.time()
-
-        batch: AgentBatch
-        for batch_idx, batch in enumerate(pbar):
-            module.set_curr_iter(curr_iter)
-            train_loss = train(model, module, batch, optimizer)
-
-            # Stepping forward the learning rate scheduler and annealers.
-            lr_scheduler.step()
-            if rank == 0 and not hyperparams["debug"]:
-                step_timer_stop = time.time()
-                elapsed = step_timer_stop - step_timer_start
-
-                log_writer.log(
-                    {
-                        "train/learning_rate": lr_scheduler.get_last_lr()[0],
-                        "train/loss": train_loss.detach().item(),
-                        "steps_per_sec": 1 / elapsed,
-                        "epoch": epoch,
-                        "batch": batch_idx,
-                    },
-                    step=curr_iter,
-                )
-
-            curr_iter += 1
-            # initialize the timer for the following iteration
-            step_timer_start = time.time()
 
         if hyperparams["lr_step"] != 0:
             step_scheduler.step()
@@ -540,7 +479,14 @@ def main():
             and epoch % hyperparams["eval_every"] == 0
             and epoch > 0
         ):
-            evaluate(model, eval_loader, rank, log_writer, epoch, curr_iter)
+            evaluate(
+                rank=rank,
+                model=module,
+                dataloader=eval_loader,
+                log_writer=log_writer,
+                epoch=epoch,
+                curr_iter=curr_iter
+            )
 
         #################################
         #          CHECKPOINT           #
@@ -551,12 +497,12 @@ def main():
             and epoch % hyperparams["save_every"] == 0
         ):
             save_checkpoint(
-                registrar.model_dir,
-                module,
-                optimizer,
-                lr_scheduler,
-                step_scheduler,
-                epoch,
+                save_dir=registrar.model_dir,
+                model=module,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                step_scheduler=step_scheduler,
+                epoch=epoch,
             )
 
         # Waiting for process 0 to be done its evaluation and visualization.
@@ -565,4 +511,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    rank, world_size = init_distributed()
+    device = get_device(rank)
+    main(rank, world_size, device)

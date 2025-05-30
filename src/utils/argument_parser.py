@@ -325,4 +325,12 @@ parser.add_argument(
     type=int,
     default=1,
 )
+
+parser.add_argument(
+    "--contrastive_weight",
+    help="weight for the contrastive/NCE loss term",
+    type=float,
+    default=0.0,
+)
+
 args = parser.parse_args()
