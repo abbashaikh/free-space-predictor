@@ -8,14 +8,14 @@ import torch.nn.functional as F
 from trajdata import AgentBatch, AgentType
 import wandb
 
-from modules.encoder import *
-from modules.decoder import *
-from modules.gmm2d import GMM2D
-from modules.discrete_latent import DiscreteLatent
+from traj_pred.modules.encoder import *
+from traj_pred.modules.decoder import *
+from traj_pred.modules.gmm2d import GMM2D
+from traj_pred.modules.discrete_latent import DiscreteLatent
 
-import dynamics as dynamic_module
+import traj_pred.dynamics as dynamic_module
 
-from utils.model_utils import *
+from traj_pred.utils.model_utils import *
 
 class MultimodalGenerativeCVAE(nn.Module):
     def __init__(

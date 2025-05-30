@@ -1,37 +1,27 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-# 
-# http://www.apache.org/licenses/LICENSE-2.0
-# 
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+"""Main trajectory predictor class"""
 from itertools import product
 from typing import Any, Dict, List, Union
 
 import numpy as np
 import torch
-from torch import nn
+import torch.nn as nn
 from trajdata import AgentBatch, AgentType
 
-import evaluation as evaluation
-from modules.mgcvae import MultimodalGenerativeCVAE
-from utils.model_utils import UpdateMode
+from traj_pred.modules.mgcvae import MultimodalGenerativeCVAE
+from traj_pred.modules.snce import SocialNCE
+from traj_pred.utils.evaluation import compute_batch_statistics_pt
+from traj_pred.utils.annealing import step_annealers, set_annealing_params
 
-
-class Trajectron(nn.Module):
+class TrajectoryPredictor(nn.Module):
+    """
+    Class for training a model that predicts human trajectories
+    """
     def __init__(self, model_registrar, hyperparams, log_writer, device):
-        super(Trajectron, self).__init__()
+        super(TrajectoryPredictor, self).__init__()
         self.hyperparams = hyperparams
         self.log_writer = log_writer
         self.device = device
+        self._curr_iter = 0
 
         self.model_registrar = model_registrar
         self.node_models_dict = nn.ModuleDict()
@@ -50,12 +40,14 @@ class Trajectron(nn.Module):
             )
         self.pred_state = self.hyperparams["pred_state"]
 
-    def set_environment(self, snce=None):
+
+    def set_environment(self):
+        """Initialize the MG-CVAE and Social NCE Models"""
         self.node_models_dict.clear()
         edge_types = list(product(AgentType, repeat=2))
 
         for node_type in AgentType:
-            # Only add a Model for NodeTypes we want to predict
+            # Only add MG-CVAE Models for NodeTypes we want to predict
             if node_type.name in self.pred_state.keys():
                 self.node_models_dict[node_type.name] = MultimodalGenerativeCVAE(
                     node_type,
@@ -63,46 +55,82 @@ class Trajectron(nn.Module):
                     self.hyperparams,
                     self.device,
                     edge_types,
-                    log_writer=self.log_writer,
-                    snce=snce,
+                    log_writer=self.log_writer
                 )
 
-    def set_annealing_params(self):
-        for node_str, model in self.node_models_dict.items():
-            model.set_annealing_params()
+        if self.hyperparams["incl_robot_node"]:
+            x_size = 2*self.hyperparams["enc_rnn_dim_history"] + 4*self.hyperparams["enc_rnn_dim_future"]
+        else:
+            x_size = 2*self.hyperparams["enc_rnn_dim_history"]
+        # Add Social NCE Model
+        snce = SocialNCE(
+            feat_dim=x_size,
+            proj_head_dim=self.hyperparams["proj_head_dim"],
+            event_enc_dim=self.hyperparams["event_enc_dim"],
+            snce_head_dim=self.hyperparams["snce_head_dim"],
+            hyperparams=self.hyperparams,
+            device=self.device
+        )
+        self.node_models_dict["snce"] = self.model_registrar.get_model("snce", snce)
 
-    def step_annealers(self):
-        for node_type in self.node_models_dict:
-            self.node_models_dict[node_type].step_annealers()
+    @property
+    def curr_iter(self):
+        """Returns the current iteration number"""
+        return self._curr_iter
 
-    def forward(self, batch, update_mode: UpdateMode = UpdateMode.BATCH_FROM_PRIOR):
-        return self.train_loss(batch, update_mode=update_mode)
+    @curr_iter.setter
+    def curr_iter(self, value):
+        self._curr_iter = value
+        for name, model in self.node_models_dict.items():
+            if name != "snce":
+                model.curr_iter = value
 
-    def train_loss(
-        self, batch: AgentBatch, update_mode: UpdateMode = UpdateMode.BATCH_FROM_PRIOR
-    ):
+    def set_all_annealing_params(self):
+        """Set the annealing parameters for all models in the predictor"""
+        for name, model in self.node_models_dict.items():
+            set_annealing_params(name, model)
+
+    def step_all_annealers(self):
+        """Step the annealers for all models in the predictor"""
+        for _, model in self.node_models_dict.items():
+            step_annealers(model)
+
+    def forward(self, batch):
+        """Forward pass of the trajectory predictor"""
+        return self.train_loss(batch)
+
+    def train_loss(self, batch: AgentBatch):
+        """Calculate loss of the MGCVAE model as well as the Social NCE Loss"""
         batch.to(self.device)
 
         # Run forward pass
         losses: List[torch.Tensor] = list()
-        losses_task: List[torch.Tensor] = list()
+        losses_mgcvae: List[torch.Tensor] = list()
         losses_nce: List[torch.Tensor] = list()
+
+        # Loss of the MG-CVAE model
         node_type: AgentType
         for node_type in batch.agent_types():
+            # MG-CVAE loss
             model: MultimodalGenerativeCVAE = self.node_models_dict[node_type.name]
-
             agent_type_batch = batch.for_agent_type(node_type)
-            loss, loss_task, loss_nce = model(agent_type_batch, update_mode)
-            losses.append(loss)
-            losses_task.append(loss_task)
+            enc, loss_mgcvae = model(agent_type_batch)
+            losses_mgcvae.append(loss_mgcvae)
+            # Social NCE loss
+            snce_model: SocialNCE = self.node_models_dict["snce"]
+            if self.hyperparams['contrastive_weight'] > 0:
+                loss_nce = snce_model(enc, batch)
+                losses.append(loss_mgcvae + loss_nce * self.hyperparams["contrastive_weight"])
+            else:
+                loss_nce = torch.tensor([0.0])
+                losses.append(loss_mgcvae)
             losses_nce.append(loss_nce)
 
-        return sum(losses), sum(losses_task), sum(losses_nce)
+        return sum(losses), sum(losses_mgcvae), sum(losses_nce)
 
     def predict_and_evaluate_batch(
         self,
         batch: AgentBatch,
-        update_mode: UpdateMode = UpdateMode.NO_UPDATE,
         output_for_pd: bool = False,
     ) -> Union[List[Dict[str, Any]], Dict[AgentType, Dict[str, torch.Tensor]]]:
         """Predicts from a batch and then evaluates the output, returning the batched errors."""
@@ -129,8 +157,7 @@ class Trajectron(nn.Module):
                 z_mode=True,
                 gmm_mode=True,
                 full_dist=False,
-                output_dists=False,
-                update_mode=update_mode,
+                output_dists=False
             )
 
             # Run forward pass
@@ -141,13 +168,12 @@ class Trajectron(nn.Module):
                 z_mode=False,
                 gmm_mode=False,
                 full_dist=True,
-                output_dists=True,
-                update_mode=update_mode,
+                output_dists=True
             )
 
             batch_eval: Dict[
                 str, torch.Tensor
-            ] = evaluation.compute_batch_statistics_pt(
+            ] = compute_batch_statistics_pt(
                 agent_type_batch.agent_fut[..., :2],
                 prediction_output_dict=predictions,
                 y_dists=y_dists,
@@ -164,7 +190,6 @@ class Trajectron(nn.Module):
     def predict(
         self,
         batch: AgentBatch,
-        update_mode: UpdateMode = UpdateMode.NO_UPDATE,
         num_samples=1,
         prediction_horizon=None,
         z_mode=False,
@@ -214,7 +239,6 @@ class Trajectron(nn.Module):
                 full_dist=full_dist,
                 all_z_sep=all_z_sep,
                 output_dists=output_dists,
-                update_mode=update_mode,
             )
 
             if output_dists:

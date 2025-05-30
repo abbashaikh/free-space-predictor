@@ -17,14 +17,14 @@ from collections import defaultdict
 
 import numpy as np
 import torch
-import wandb
 from matplotlib import pyplot as plt
 from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import binary_dilation
 from scipy.stats import gaussian_kde
+import wandb
 
-from utils.visualization_utils import plot_barplots, plot_boxplots
-from utils.trajectory_utils import prediction_output_to_trajectories
+from .visualization_utils import plot_barplots, plot_boxplots
+from .trajectory_utils import prediction_output_to_trajectories
 
 
 def compute_ade_pt(predicted_trajs, gt_traj):

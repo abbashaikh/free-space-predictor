@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.model_utils import ModeKeys
+from traj_pred.utils.model_utils import ModeKeys
 
 
 #### Helper Functions ####

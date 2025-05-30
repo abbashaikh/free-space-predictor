@@ -18,7 +18,7 @@ from typing import Optional
 import torch
 import torch.distributions as td
 
-from modules.gmm2d import GMM2D
+from traj_pred.modules.gmm2d import GMM2D
 
 from .dynamic import Dynamic
 

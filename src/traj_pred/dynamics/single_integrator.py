@@ -15,8 +15,8 @@
 
 import torch
 
-from modules.gmm2d import GMM2D
-from utils import block_diag
+from traj_pred.modules.gmm2d import GMM2D
+from traj_pred.utils import block_diag
 
 from .dynamic import Dynamic
 

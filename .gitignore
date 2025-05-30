@@ -414,3 +414,6 @@ dmypy.json
 
 # Ignore all files under the unified_data_cache folder
 /data/pedestrian_datasets/.unified_data_cache/
+
+# Miscellaneous files
+etc/

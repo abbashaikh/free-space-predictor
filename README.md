@@ -1,5 +1,5 @@
-# Free Space Social Navigation
-Robot social navigation with probabilistic collision avoidance leveraging non-convex scenario optimization; augmented with a free space support predictor
+# Free Space Predictor
+Model to predict agent trajectories and provide an estimate of the free space available to the robot (number of sides of the free space polygon) in social navigation scenarios.
 
 ## Installation ##
 Clone the repository
@@ -13,30 +13,35 @@ Create a conda environment and install dependencies
 conda create --name fsp python=3.9 -y
 conda activate fsp
 pip install -r requirements.txt
-
-# See note in requirements.txt for why we do this.
-pip install --no-dependencies l5kit==1.5.0
 ```
 
-### Local Packages ###
-From the project's root directory run
+### CGAL Installation
+Download `CGAL-6.0.1.tar.xz` from [CGAL's Releases page](https://github.com/CGAL/cgal/releases). Unpack the file containing CGAL sources,
 ```sh
-pip install -e .
+tar xf CGAL-6.0.1.tar.xz
+```
+and move the directory to a suitable location (for example, `/usr/local/lib`).
+
+### Local Packages and C++ Extensions ###
+Update the CMake argument `DCGAL_DIR` to match the location of your CGAL installation, then run the following from the project's root directory:
+```sh
+pip install .
 ```
 
-## Model Training ##
-This repository makes use of [Weights & Biases](https://wandb.ai) for logging training information. Before running any of the following commands, please edit Lines 114 and 115 of `train.py` to specify your desired W&B project and entity names.
+## Trajectory Prediction Model Training ##
+This repository makes use of [Weights & Biases](https://wandb.ai) for logging training information. Before running any of the following commands, please edit Lines 114 and 115 of `traj_pred/train.py` to specify your desired W&B project and entity names.
 
 ### Pedestrian Dataset ###
-To train a model on the ETH and UCY Pedestrian datasets, execute the relevant command in `train_model.sh`
+We recommend first preprocessing data into a canonical format by running the script `data/preprocess_data.py`. This preprocessing needs to be executed only once before the first training command.
+
+To train a model on the ETH and UCY Pedestrian datasets, execute the relevant command in `train_model.sh`.
 
 **NOTE:** Make sure that you specify the correct directory for `--trajdata_cache_dir` (where trajdata's cache is located). The provided values in the shell script are examples, but you can choose whatever suits your computing environment best.
 
-For example, running this command from the project's root directory will train the trajectory prediction model on the ETH Univ dataset.
+For example, running this command from within `traj_pred/` will train the trajectory prediction model on the ETH Univ dataset.
 
 ```sh
-# To train a new model
-torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
+torchrun --nproc_per_node=1 --master_port=29500 train.py \
         --eval_every=1 \
         --vis_every=1 \
         --batch_size=256 \

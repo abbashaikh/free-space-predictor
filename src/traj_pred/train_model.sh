@@ -1,5 +1,5 @@
 # To train a new model
-torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
+torchrun --nproc_per_node=1 --master_port=29500 train.py \
         --eval_every=1 \
         --vis_every=1 \
         --batch_size=256 \
@@ -22,7 +22,7 @@ torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
         --log_tag=eth
 
 # To update a pre-trained model
-torchrun --nproc_per_node=1 --master_port=29500 ./train.py \
+torchrun --nproc_per_node=1 --master_port=29500 train.py \
         --eval_every=1 \
         --vis_every=1 \
         --batch_size=256 \
