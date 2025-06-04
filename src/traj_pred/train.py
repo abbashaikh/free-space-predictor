@@ -448,7 +448,7 @@ def main(rank, world_size, device):
      step_scheduler) = init_model_and_optimizer(
         hyperparams, log_writer, device, model_dir)
 
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     curr_iter: int = 0
     for epoch in range(1, hyperparams['train_epochs'] + 1):
         #################################

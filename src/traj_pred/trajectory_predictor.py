@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from trajdata import AgentBatch, AgentType
+from trajdata import AgentBatch, SceneBatch, AgentType
 
 from traj_pred.modules.mgcvae import MultimodalGenerativeCVAE
 from traj_pred.modules.snce import SocialNCE
@@ -264,3 +264,28 @@ class TrajectoryPredictor(nn.Module):
             return dists_dict, predictions_dict
         else:
             return predictions_dict
+        
+    def get_encoding(self, batch: SceneBatch):
+        """
+        Get encodings for all agents in a scene
+        (works only with batch_size==1)
+
+        Args:
+            batch (SceneBatch): information of all agents in a scene
+        """
+        node_type: AgentType
+        for node_type in batch.agent_types():
+            model: MultimodalGenerativeCVAE = self.node_models_dict[node_type.name]
+            enc, _, _, _, _ = model.obtain_encoded_tensors(batch)
+        return enc
+
+    def incremental_forward(
+        self,
+        batch: SceneBatch,
+        prediction_horizon,
+        num_samples,
+        full_dist=False
+    ):
+        """Predict future of all agents in a scene"""
+        #TODO
+        return None
