@@ -1,102 +1,12 @@
-import numpy as np
+"""Encoder modules used by MG-CVAE"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from traj_pred.utils.model_utils import ModeKeys
-
-
-#### Helper Functions ####
-def unpack_rnn_state(state_tuple):
-    """
-    Convert output of bi-directional LSTMs to batch first 
-    and squeeze along feature dimension
-    """
-    # PyTorch returned LSTM states have 3 dims:
-    # (num_layers * num_directions, batch, hidden_size)
-
-    state = torch.cat(state_tuple, dim=0).permute(1, 0, 2)
-    # Now state is (batch, 2 * num_layers * num_directions, hidden_size)
-
-    state_size = state.size()
-    return torch.reshape(state, (-1, state_size[1] * state_size[2]))
-
-def roll_by_gather(mat: torch.Tensor, dim: int, shifts: torch.LongTensor):
-    """Shift up rows of arrays by specified amount"""
-    # assumes 3D array
-    batch, ts, dim = mat.shape
-
-    arange1 = (
-        torch.arange(ts, device=shifts.device)
-        .unsqueeze(0)
-        .unsqueeze(-1)
-        .expand(batch, -1, dim)
-    )
-    # print(arange1)
-    arange2 = (arange1 - shifts[:, None, None]) % ts
-    # print(arange2)
-    return torch.gather(mat, 1, arange2)
-
-def get_agent_neigh_joint_state(
-    node_history_st: torch.Tensor,
-    node_history_len: torch.Tensor,
-    neigh_hist: torch.Tensor,
-    neigh_hist_len: torch.Tensor,
-    neigh_types: torch.Tensor,
-):
-    """
-    Creates node-neighbor history pairs
-    """
-    # pad to have equal sequence lengths
-    if neigh_hist.shape[2] < node_history_st.shape[1]:
-        neigh_hist = F.pad(
-            neigh_hist,
-            pad=(0, 0, 0, node_history_st.shape[1] - neigh_hist.shape[2]),
-            value=np.nan,
-        )
-    elif neigh_hist.shape[2] > node_history_st.shape[1]:
-        node_history_st = F.pad(
-            node_history_st,
-            pad=(0, 0, 0, neigh_hist.shape[2] - node_history_st.shape[1]),
-            value=np.nan,
-        )
-    # repeat node history length, num. of neighbor times
-    node_hist_lens_for_cat = node_history_len.unsqueeze(1).expand(
-        (-1, neigh_hist.shape[1])
-    )
-    # find minimum history for each node-neighbor pair
-    joint_history_len = torch.minimum(
-        neigh_hist_len, node_hist_lens_for_cat
-    ).flatten()
-    has_data: torch.Tensor = joint_history_len > 0
-    # repeat node history, num. of neighbor times and keep those with minimum history > 0
-    node_hist_for_cat = node_history_st.repeat_interleave(
-        neigh_hist.shape[1], dim=0, output_size=has_data.shape[0]
-    )[has_data]
-    # squeeze neigbor history along num. of neigbors dim.
-    neigh_hist_for_cat = neigh_hist.reshape(-1, *neigh_hist.shape[2:])[has_data]
-    # history lenght and neighbor types for joint node-neigh pairs under consideration
-    joint_history_len = joint_history_len[has_data]
-    joint_neigh_types = neigh_types.flatten()[has_data]
-
-    # calculate shift in timesteps
-    # e.g. if node history length > neigh. history length,
-    # shift node history up to only consider common timesteps
-    node_shifts = joint_history_len - node_hist_lens_for_cat.flatten()[has_data]
-    neigh_shifts = joint_history_len - neigh_hist_len.flatten()[has_data]
-    # execute the shifts
-    node_hist_for_cat = roll_by_gather(
-        node_hist_for_cat, dim=1, shifts=node_shifts.to(node_hist_for_cat.device)
-    )
-    neigh_hist_for_cat = roll_by_gather(
-        neigh_hist_for_cat, dim=1, shifts=neigh_shifts.to(neigh_hist_for_cat.device)
-    )
-    # concatenate node and neigh. states
-    joint_history = torch.cat([neigh_hist_for_cat, node_hist_for_cat], dim=-1)
-
-    return joint_history, joint_history_len, joint_neigh_types
-
-############################
+from traj_pred.utils.model_utils import (
+    ModeKeys,
+    unpack_rnn_state
+)
 
 ############################
 #   Node History Encoder   #
@@ -318,57 +228,3 @@ class LatentDistEncoder(nn.Module):
 
         return latent
 
-###################
-#   Decoder GRU   #
-###################
-class DecoderGRU(nn.Module):
-    """
-    Gated Recurrent Unit Decoder
-    """
-    def __init__(
-            self,
-            state_length,
-            pred_state_length,
-            z_size,
-            x_size,
-            rnn_hidden_dim,
-            decoder_input_dim
-    ):
-        super(DecoderGRU, self).__init__()
-        self.state_action = nn.Linear(state_length, pred_state_length)
-        self.rnn = nn.GRU(z_size + x_size, rnn_hidden_dim, batch_first=True)
-        self.rnn_cell = nn.GRUCell(decoder_input_dim, rnn_hidden_dim)
-        self.initial_h = nn.Linear(z_size + x_size, rnn_hidden_dim)
-
-    def forward(self):
-        """Forward pass of the GRU decoder unit"""
-
-        return
-    
-###################
-#   Decoder GMM   #
-###################
-class DecoderGMM(nn.Module):
-    """
-    Gausian Mixture Model Decoder
-    """
-    def __init__(
-            self,
-            pred_state_length,
-            gmm_components
-    ):
-        super(DecoderGMM, self).__init__()
-        gmm_mus_dim = pred_state_length
-        gmm_log_sigmas_dim = pred_state_length
-        gmm_corrs_dim = 1
-        gmm_dims = gmm_mus_dim + gmm_log_sigmas_dim + gmm_corrs_dim
-
-        self.proj_to_log_pis = nn.Linear(_, gmm_components) #TODO: one_layer_equivalent?
-        self.proj_to_mus = nn.Linear(_, gmm_components*pred_state_length) #TODO: ""
-        self.proj_to_log_sigmas = nn.Linear(_, gmm_components*pred_state_length) #TODO: ""
-        self.proj_to_corrs = nn.Linear(_, gmm_components) #TODO: ""
-
-    def forward(self):
-        """Forward pass of the GMM decoder module"""
-        
-        return

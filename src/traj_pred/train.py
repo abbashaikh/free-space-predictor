@@ -23,12 +23,12 @@ from trajdata.augmentation import NoiseHistories
 from trajdata.data_structures.batch import AgentBatch
 import wandb
 
-from modules.model_registrar import ModelRegistrar
-from models.trajectory_predictor import TrajectoryPredictor
-from utils import evaluation
+from traj_pred.modules import ModelRegistrar
+from traj_pred import TrajectoryPredictor
+from traj_pred.utils import evaluation
 # from utils import visualization_utils
-from utils.argument_parser import args
-from utils.comm import all_gather
+from traj_pred.utils import args
+from traj_pred.utils.comm import all_gather
 
 # TODO: For nuScenes dataset
 # def restrict_to_predchal(

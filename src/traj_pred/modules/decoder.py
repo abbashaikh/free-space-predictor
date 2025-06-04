@@ -1,4 +1,4 @@
-import numpy as np
+"""Decoder modules for MG-CVAE"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

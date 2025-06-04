@@ -14,37 +14,6 @@ from trajdata.data_structures.agent import AgentMetadata, AgentType
 from trajdata.data_structures.state import StateArray
 from trajdata.augmentation import NoiseHistories
 
-def custom(
-    batch_elem: SceneBatchElement,
-    history_sec: Tuple[float, float],
-) -> np.ndarray:
-    '''
-    
-    '''
-    dt = 0.4    # pedestrain dataset's dt
-    hist_steps: int = round((history_sec[1]/dt) + 1)
-    agents: List[AgentMetadata] = batch_elem.agents
-    (
-        agent_histories,
-        _,
-        agent_history_lens_np,
-    ) = batch_elem.cache.get_agents_history(batch_elem.scene_ts, agents, history_sec)
-    num_agents = agent_history_lens_np.size
-    padded_hist = []
-    for i in range(num_agents):
-        sa = agent_histories[i]
-        arr = np.asarray(sa)
-        _, state_dim = arr.shape
-
-        block = np.full((hist_steps, state_dim), np.nan, dtype=arr.dtype)
-
-        t_i = agent_history_lens_np[i]
-        start_row = hist_steps - t_i
-        block[start_row:] = arr
-        padded_hist.append(block)
-    stacked_hist = np.stack(padded_hist, axis=0)
-    return stacked_hist
-
 def all_current_states(
     batch_elem: SceneBatchElement,
 ) -> np.ndarray:

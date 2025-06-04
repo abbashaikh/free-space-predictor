@@ -1,5 +1,5 @@
 # To train a new model
-torchrun --nproc_per_node=1 --master_port=29500 train.py \
+torchrun --nproc_per_node=1 --master_port=29500 src/traj_pred/train.py \
         --eval_every=1 \
         --vis_every=1 \
         --batch_size=256 \

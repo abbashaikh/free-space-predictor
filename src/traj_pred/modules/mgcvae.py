@@ -1,4 +1,4 @@
-import warnings
+"""The MG-CVAE NN Module"""
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -8,16 +8,17 @@ import torch.nn.functional as F
 from trajdata import AgentBatch, AgentType
 import wandb
 
-from traj_pred.modules.encoder import *
-from traj_pred.modules.decoder import *
-from traj_pred.modules.gmm2d import GMM2D
-from traj_pred.modules.discrete_latent import DiscreteLatent
-
+import traj_pred.modules as md
 import traj_pred.dynamics as dynamic_module
 
-from traj_pred.utils.model_utils import *
+from traj_pred.utils.model_utils import (
+    ModeKeys,
+    mutual_inf_mc,
+    get_agent_neigh_joint_state
+)
 
 class MultimodalGenerativeCVAE(nn.Module):
+    """MG-CVAE class definition"""
     def __init__(
         self,
         node_type_obj: AgentType,
@@ -27,6 +28,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         edge_types,
         log_writer=None
     ):
+        """Initialization"""
         super(MultimodalGenerativeCVAE, self).__init__()
 
         self.hyperparams = hyperparams
@@ -108,13 +110,13 @@ class MultimodalGenerativeCVAE(nn.Module):
         # Node History Encoder
         self.add_submodule(
             nt + "/node_history_encoder",
-            model_if_absent=NodeHistoryEncoder(self.state_length, hp["enc_rnn_dim_history"])
+            model_if_absent=md.NodeHistoryEncoder(self.state_length, hp["enc_rnn_dim_history"])
         )
 
         # Node Future Encoder
         self.add_submodule(
             nt + "/node_future_encoder",
-            model_if_absent=NodeFutureEncoder(
+            model_if_absent=md.NodeFutureEncoder(
                 self.state_length,
                 self.pred_state_length,
                 hp["enc_rnn_dim_future"]
@@ -125,7 +127,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         if self.hyperparams["incl_robot_node"]:
             self.add_submodule(
                 "robot_future_encoder",
-                model_if_absent=NodeFutureEncoder(
+                model_if_absent=md.NodeFutureEncoder(
                     self.robot_state_length,
                     self.robot_state_length,
                     hp["enc_rnn_dim_future"]
@@ -163,7 +165,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                 #TODO: implement edge encoder modules
                 self.add_submodule(
                     "->".join([edge_type[0].name, edge_type[1].name]) + "/edge_encoder",
-                    model_if_absent=EdgeEncoder(
+                    model_if_absent=md.EdgeEncoder(
                         self.state_length,
                         neighbor_state_length,
                         hp["enc_rnn_dim_edge"]
@@ -176,7 +178,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                 me_params = hp["map_encoder"][nt]
                 self.add_submodule(
                     nt + "/map_encoder",
-                    model_if_absent=CNNMapEncoder(
+                    model_if_absent=md.CNNMapEncoder(
                         me_params["map_channels"],
                         me_params["hidden_channels"],
                         me_params["output_size"],
@@ -188,12 +190,12 @@ class MultimodalGenerativeCVAE(nn.Module):
                 self.x_size += hp["map_encoder"][nt]["output_size"]
 
         # Discrete Latent Variable
-        self.latent = DiscreteLatent(hp, self.device)
+        self.latent = md.DiscreteLatent(hp, self.device)
 
         # p_z_x
         self.add_submodule(
             nt + "/p_z_x",
-            model_if_absent=LatentDistEncoder(
+            model_if_absent=md.LatentDistEncoder(
                 self.x_size,
                 hp["p_z_x_MLP_dims"],
                 self.latent.z_dim)
@@ -202,7 +204,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         # q_z_xy
         self.add_submodule(
             nt + "/q_z_xy",
-            model_if_absent=LatentDistEncoder(
+            model_if_absent=md.LatentDistEncoder(
                 self.x_size + 4 * hp["enc_rnn_dim_future"],
                 hp["q_z_xy_MLP_dims"],
                 self.latent.z_dim)
@@ -218,7 +220,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         # Decoder Pre-GRU
         self.add_submodule(
             nt + "/decoder/PreGRU",
-            model_if_absent=DecoderPreGRU(
+            model_if_absent=md.DecoderPreGRU(
                 self.state_length,
                 self.pred_state_length,
                 self.z_size,
@@ -229,7 +231,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         # Decoder GRU
         self.add_submodule(
             nt + "/decoder/GRU",
-            model_if_absent=DecoderGRU(
+            model_if_absent=md.DecoderGRU(
                 hp["dec_rnn_dim"],
                 decoder_input_dims,
                 hp["dec_final_dim"]
@@ -238,7 +240,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         # Decoder GMM
         self.add_submodule(
             nt + "/decoder/GMM",
-            model_if_absent=DecoderGMM(
+            model_if_absent=md.DecoderGMM(
                 self.pred_state_length,
                 self.hyperparams["dec_final_dim"],
                 hp["GMM_components"]
@@ -543,7 +545,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                 self.node_type  + "/decoder/GMM"
             ](decoder_out)
 
-            gmm = GMM2D(log_pi_t, mu_t, log_sigma_t, corr_t)  # [k;bs, pred_dim]
+            gmm = md.GMM2D(log_pi_t, mu_t, log_sigma_t, corr_t)  # [k;bs, pred_dim]
 
             if mode == ModeKeys.PREDICT and gmm_mode:
                 a_t = gmm.mode()
@@ -596,7 +598,7 @@ class MultimodalGenerativeCVAE(nn.Module):
         log_sigmas = torch.stack(log_sigmas, dim=1)
         corrs = torch.stack(corrs, dim=1)
 
-        a_dist = GMM2D(
+        a_dist = md.GMM2D(
             torch.reshape(log_pis, [num_samples, -1, ph, num_components]),
             torch.reshape(mus, [num_samples, -1, ph, num_components * pred_dim]),
             torch.reshape(log_sigmas, [num_samples, -1, ph, num_components * pred_dim]),
