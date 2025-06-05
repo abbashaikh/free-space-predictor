@@ -28,10 +28,51 @@ def all_current_states(
         curr_pos.append(state)
     return np.stack(curr_pos, axis=0)
 
+def custom_agent_hist(
+    batch_elem: SceneBatchElement,
+    history_sec: Tuple[Optional[float], Optional[float]],
+) -> np.ndarray:
+    """agent’s history transformed into agent-centric coordinates"""
+    dt = batch_elem.dt
+    max_hist_len: int = round((history_sec[1]/dt)) + 1
+    world_agent_hist: List[np.ndarray] = batch_elem.agent_histories
+    state_dim = world_agent_hist[0].shape[-1]
+
+    agent_pos_list = [hist[-1,:2] for hist in world_agent_hist]
+    agent_sc_list = [hist[-1,-2:] for hist in world_agent_hist]
+
+    agents_hist_st: List[np.ndarray] = []
+    for idx, (pos, sc) in enumerate(zip(agent_pos_list, agent_sc_list)):
+        cos_agent = sc[-1]
+        sin_agent = sc[-2]
+        centered_world_from_agent_tf: np.ndarray = np.array(
+            [
+                [cos_agent, -sin_agent, pos[0]],
+                [sin_agent, cos_agent, pos[1]],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        centered_agent_from_world_tf: np.ndarray = np.linalg.inv(
+            centered_world_from_agent_tf
+        )
+        hist = world_agent_hist[idx]
+        hist_st = transform_state_np_2d(hist, centered_agent_from_world_tf)
+
+        t_i = hist_st.shape[0]
+        if t_i<max_hist_len:
+            padding = np.full((max_hist_len-t_i, state_dim), np.nan, dtype=hist_st.dtype)
+            hist_st_padded = np.concatenate([padding, hist_st], axis=0)
+        else:
+            hist_st_padded = hist_st[:max_hist_len]
+        agents_hist_st.append(hist_st_padded)
+
+    return np.stack(agents_hist_st, axis=0)
+
 def get_neighs(
     batch_elem: SceneBatchElement,
     interaction_radius: float,
 ) -> np.ndarray:
+    """Provides adjacency matrix"""
     agents: List[AgentMetadata] = batch_elem.agents
     curr_states = []
     for agent in agents:
@@ -48,17 +89,24 @@ def get_neighs(
             for agent_st in curr_states
         ]
         is_neigh.append([dist <= interaction_radius for dist in distances])
-    return np.stack(is_neigh, axis=0)
+    is_neigh_mat = np.stack(is_neigh, axis=0)
+    np.fill_diagonal(is_neigh_mat, False)
+
+    return is_neigh_mat
 
 def per_agent_neigh_hist(
     batch_elem: SceneBatchElement,
     history_sec: Tuple[Optional[float], Optional[float]],
 ) -> np.ndarray:
+    """
+    Provide neighbor history of each agent in scene
+    in respective agent-centric frames
+    """
     assert batch_elem.standardize_data is False, \
-        "Agent-centric history requires a non-standarized dataset"
+        "Per-agent history requires a non-standarized dataset (set standardize_data=False)"
 
     dt = batch_elem.dt
-    hist_len: int = round((history_sec[1]/dt)) + 1
+    max_hist_len: int = round((history_sec[1]/dt)) + 1
     world_agent_hist: List[np.ndarray] = batch_elem.agent_histories
     state_dim = world_agent_hist[0].shape[-1]
     num_agents = batch_elem.num_agents
@@ -68,6 +116,7 @@ def per_agent_neigh_hist(
 
     neigh_hists: List[List[np.ndarray]] = []
     for idx, (pos, sc) in enumerate(zip(agent_pos_list, agent_sc_list)):
+        # calculate transformation matrix to go from world frame to agent frame
         cos_agent = sc[-1]
         sin_agent = sc[-2]
         centered_world_from_agent_tf: np.ndarray = np.array(
@@ -81,19 +130,23 @@ def per_agent_neigh_hist(
             centered_world_from_agent_tf
         )
 
-        row_hists: List[np.ndarray] = []
+        row_hists: List[Optional[np.ndarray]] = []
         for jdx, agent_hist in enumerate(world_agent_hist):
-            if idx==jdx:
+            # skip self
+            if jdx == idx:
                 continue
+            # append if neighbor
             if batch_elem.extras["is_neigh"][idx, jdx]:
                 hist_st = transform_state_np_2d(agent_hist, centered_agent_from_world_tf)
                 row_hists.append(hist_st)
+            # else append None
             else:
                 row_hists.append(None)
         neigh_hists.append(row_hists)
 
-    output = np.full((num_agents, num_agents-1, hist_len, state_dim), np.nan, dtype=float)
-
+    output = np.full((num_agents, num_agents-1, max_hist_len, state_dim), np.nan, dtype=float)
+    # pad arrays to match maximum history length (8 steps),
+    # and max possible neighbors (num of agents - 1)
     for i in range(num_agents):
         for k, hist_ij in enumerate(neigh_hists[i]):
             if hist_ij is None:
@@ -109,39 +162,46 @@ def extras_collate_fn(
     base_collate: Callable[[List[SceneBatchElement]], SceneBatch],
 ) -> SceneBatch:
     """
-    1) Pads each extra (“curr_states”, “is_neigh”, “custom”) 
-       to the same first dimension = max_agents_in_batch.
+    1) Pads each extra (“agent_hist_st”, “is_neigh”, “neigh_hist”) 
     2) Calls base_collate(...) (i.e. scene_collate_fn) on the padded batch.
     """
-    max_agent_num: int = max(elem.num_agents for elem in batch_elems)
+    max_agent_num: int = max(elem.num_agents for elem in batch_elems) # M
     dt = batch_elems[0].dt
-    hist_len: int = round((history_sec[1]/dt)) + 1
-    state_dim = batch_elems[0].agent_histories[0].shape[-1] #TODO
+    max_hist_len: int = round((history_sec[1]/dt)) + 1
+    state_dim = batch_elems[0].agent_histories[0].shape[-1]
 
     for elem in batch_elems:
         n_i = elem.num_agents
-
-        # Pad is_neigh: shape (n_i, n_i) → (max_agents_in_batch, max_agents_in_batch)
+        agent_hist = elem.extras.get("agent_hist_st")
         mat = elem.extras["is_neigh"]
+        neigh_hist = elem.extras["neigh_hist"]
+
         if n_i < max_agent_num:
+            # Pad "agent_hist_st": shape (n_i, max_hist_len, 8) -> (M, max_hist_len, 8)
+            pad_agent_hist = np.full(
+                (max_agent_num-n_i, max_hist_len, state_dim),
+                np.nan,
+                dtype=agent_hist.dtype
+            )
+            padded_agent_hist = np.concatenate([agent_hist, pad_agent_hist], axis=0)
+            # Pad "is_neigh": shape (n_i, n_i) -> (max_agents_in_batch, max_agents_in_batch)
             pad_mat = np.zeros((max_agent_num, max_agent_num), dtype=mat.dtype)
             pad_mat[:n_i, :n_i] = mat
             elem.extras["is_neigh"] = pad_mat
-        else:
-            elem.extras["is_neigh"] = mat[:max_agent_num, :max_agent_num]
-
-        neigh_hist = elem.extras["neigh_hist"]
-        if n_i<max_agent_num:
-            padded_hist = np.full(
-                (max_agent_num, max_agent_num-1, hist_len, state_dim),
+            # Pad "neigh_hist": shape (n_i, n_i-1, max_hist_len, 8) -> (M, M-1, max_hist_len, 8)
+            padded_neigh_hist = np.full(
+                (max_agent_num, max_agent_num-1, max_hist_len, state_dim),
                 np.nan,
                 dtype=neigh_hist.dtype
             )
-            padded_hist[:n_i, :(n_i - 1), :, :] = neigh_hist
+            padded_neigh_hist[:n_i, :(n_i - 1), :, :] = neigh_hist
         else:
-            padded_hist = neigh_hist[:max_agent_num]
+            padded_agent_hist = agent_hist[:max_agent_num]
+            elem.extras["is_neigh"] = mat[:max_agent_num, :max_agent_num]
+            padded_neigh_hist = neigh_hist[:max_agent_num]
 
-        elem.extras["neigh_hist"] = padded_hist
+        elem.extras["agent_hist_st"] = padded_agent_hist
+        elem.extras["neigh_hist"] = padded_neigh_hist
 
     return base_collate(batch_elems)
 
@@ -169,6 +229,9 @@ def main():
     # attention_radius[(AgentType.PEDESTRIAN, AgentType.PEDESTRIAN)] = 5.0
     interaction_radius = 5.0
 
+    history_sec = (0.1, hyperparams["history_sec"])
+    future_sec = (0.1, hyperparams["prediction_sec"])
+
     input_noise = 0.0
     augmentations = list()
     if input_noise > 0.0:
@@ -179,8 +242,8 @@ def main():
     dataset = UnifiedDataset(
         desired_data=desired_data,
         centric="scene",
-        history_sec=(0.1, hyperparams["history_sec"]),
-        future_sec=(0.1, hyperparams["prediction_sec"]),
+        history_sec=history_sec,
+        future_sec=future_sec,
         agent_interaction_distances=attention_radius,
         max_agent_num=max_agent_num,
         incl_robot_future=hyperparams["incl_robot_node"],
@@ -194,9 +257,9 @@ def main():
         data_dirs=data_dirs,
         verbose=True,
         extras={
-            # "curr_states": all_current_states,
-            "is_neigh": partial(get_neighs, interaction_radius=5.0),
-            "neigh_hist": partial(per_agent_neigh_hist, history_sec=(0.1, hyperparams["history_sec"]))
+            "agent_hist_st": partial(custom_agent_hist, history_sec=history_sec),
+            "is_neigh": partial(get_neighs, interaction_radius=interaction_radius),
+            "neigh_hist": partial(per_agent_neigh_hist, history_sec=history_sec),
         }
     )
 
@@ -225,6 +288,6 @@ def main():
 if __name__ == '__main__':
     batch = main()
     print(f"Num of agents in scenes: {batch.num_agents}")
-    # print(f"Shape of all current states array: {batch.extras['curr_states'].shape}")
+    print(f"Shape of agent_hist_st array: {batch.extras['agent_hist_st'].shape}")
     print(f"Shape of is_neigh array: {batch.extras['is_neigh'].shape}")
     print(f"Shape of neigh hist array: {batch.extras['neigh_hist'].shape}")
