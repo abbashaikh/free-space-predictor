@@ -2,7 +2,7 @@ import os
 import json
 from functools import partial
 from collections import defaultdict
-from typing import Tuple, List, Callable
+from typing import Tuple, List, Callable, Optional
 
 import numpy as np
 # import torch
@@ -13,6 +13,7 @@ from trajdata.data_structures.batch_element import SceneBatchElement
 from trajdata.data_structures.agent import AgentMetadata, AgentType
 from trajdata.data_structures.state import StateArray
 from trajdata.augmentation import NoiseHistories
+from trajdata.utils.state_utils import transform_state_np_2d
 
 def all_current_states(
     batch_elem: SceneBatchElement,
@@ -31,7 +32,15 @@ def get_neighs(
     batch_elem: SceneBatchElement,
     interaction_radius: float,
 ) -> np.ndarray:
-    curr_states = batch_elem.extras["curr_states"]
+    agents: List[AgentMetadata] = batch_elem.agents
+    curr_states = []
+    for agent in agents:
+        raw_state: StateArray = batch_elem.cache.get_raw_state(
+            agent.name, batch_elem.scene_ts
+        )
+        state = np.asarray(raw_state)
+        curr_states.append(state)
+
     is_neigh = []
     for state in curr_states:
         distances = [
@@ -41,8 +50,62 @@ def get_neighs(
         is_neigh.append([dist <= interaction_radius for dist in distances])
     return np.stack(is_neigh, axis=0)
 
+def per_agent_neigh_hist(
+    batch_elem: SceneBatchElement,
+    history_sec: Tuple[Optional[float], Optional[float]],
+) -> np.ndarray:
+    assert batch_elem.standardize_data is False, \
+        "Agent-centric history requires a non-standarized dataset"
+
+    dt = batch_elem.dt
+    hist_len: int = round((history_sec[1]/dt)) + 1
+    world_agent_hist: List[np.ndarray] = batch_elem.agent_histories
+    state_dim = world_agent_hist[0].shape[-1]
+    num_agents = batch_elem.num_agents
+
+    agent_pos_list = [hist[-1,:2] for hist in world_agent_hist]
+    agent_sc_list = [hist[-1,-2:] for hist in world_agent_hist]
+
+    neigh_hists: List[List[np.ndarray]] = []
+    for idx, (pos, sc) in enumerate(zip(agent_pos_list, agent_sc_list)):
+        cos_agent = sc[-1]
+        sin_agent = sc[-2]
+        centered_world_from_agent_tf: np.ndarray = np.array(
+            [
+                [cos_agent, -sin_agent, pos[0]],
+                [sin_agent, cos_agent, pos[1]],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        centered_agent_from_world_tf: np.ndarray = np.linalg.inv(
+            centered_world_from_agent_tf
+        )
+
+        row_hists: List[np.ndarray] = []
+        for jdx, agent_hist in enumerate(world_agent_hist):
+            if idx==jdx:
+                continue
+            if batch_elem.extras["is_neigh"][idx, jdx]:
+                hist_st = transform_state_np_2d(agent_hist, centered_agent_from_world_tf)
+                row_hists.append(hist_st)
+            else:
+                row_hists.append(None)
+        neigh_hists.append(row_hists)
+
+    output = np.full((num_agents, num_agents-1, hist_len, state_dim), np.nan, dtype=float)
+
+    for i in range(num_agents):
+        for k, hist_ij in enumerate(neigh_hists[i]):
+            if hist_ij is None:
+                continue
+            len_j = hist_ij.shape[0]
+            output[i, k, -len_j:, :] = hist_ij
+
+    return output
+
 def extras_collate_fn(
     batch_elems: List[SceneBatchElement],
+    history_sec: Tuple[Optional[float], Optional[float]],
     base_collate: Callable[[List[SceneBatchElement]], SceneBatch],
 ) -> SceneBatch:
     """
@@ -51,16 +114,12 @@ def extras_collate_fn(
     2) Calls base_collate(...) (i.e. scene_collate_fn) on the padded batch.
     """
     max_agent_num: int = max(elem.num_agents for elem in batch_elems)
+    dt = batch_elems[0].dt
+    hist_len: int = round((history_sec[1]/dt)) + 1
+    state_dim = batch_elems[0].agent_histories[0].shape[-1] #TODO
 
     for elem in batch_elems:
-        # Pad curr_states: shape (n_i, state_dim) → (max_agents_in_batch, state_dim)
-        curr_arr = elem.extras["curr_states"]
-        n_i, state_dim = curr_arr.shape
-        if n_i < max_agent_num:
-            pad_block = np.zeros((max_agent_num - n_i, state_dim), dtype=curr_arr.dtype)
-            elem.extras["curr_states"] = np.concatenate([curr_arr, pad_block], axis=0)
-        else:
-            elem.extras["curr_states"] = curr_arr[:max_agent_num]
+        n_i = elem.num_agents
 
         # Pad is_neigh: shape (n_i, n_i) → (max_agents_in_batch, max_agents_in_batch)
         mat = elem.extras["is_neigh"]
@@ -70,6 +129,19 @@ def extras_collate_fn(
             elem.extras["is_neigh"] = pad_mat
         else:
             elem.extras["is_neigh"] = mat[:max_agent_num, :max_agent_num]
+
+        neigh_hist = elem.extras["neigh_hist"]
+        if n_i<max_agent_num:
+            padded_hist = np.full(
+                (max_agent_num, max_agent_num-1, hist_len, state_dim),
+                np.nan,
+                dtype=neigh_hist.dtype
+            )
+            padded_hist[:n_i, :(n_i - 1), :, :] = neigh_hist
+        else:
+            padded_hist = neigh_hist[:max_agent_num]
+
+        elem.extras["neigh_hist"] = padded_hist
 
     return base_collate(batch_elems)
 
@@ -94,7 +166,8 @@ def main():
     attention_radius = defaultdict(
         lambda: 20.0
     )  # Default range is 20m unless otherwise specified.
-    attention_radius[(AgentType.PEDESTRIAN, AgentType.PEDESTRIAN)] = 5.0
+    # attention_radius[(AgentType.PEDESTRIAN, AgentType.PEDESTRIAN)] = 5.0
+    interaction_radius = 5.0
 
     input_noise = 0.0
     augmentations = list()
@@ -121,8 +194,9 @@ def main():
         data_dirs=data_dirs,
         verbose=True,
         extras={
-            "curr_states": all_current_states,
+            # "curr_states": all_current_states,
             "is_neigh": partial(get_neighs, interaction_radius=5.0),
+            "neigh_hist": partial(per_agent_neigh_hist, history_sec=(0.1, hyperparams["history_sec"]))
         }
     )
 
@@ -133,7 +207,10 @@ def main():
     dataloader = data.DataLoader(
         dataset,
         # collate_fn=dataset.get_collate_fn(pad_format="right"),
-        collate_fn=partial(extras_collate_fn, base_collate=base_collate),
+        collate_fn=partial(
+            extras_collate_fn,
+            history_sec=(0.1, hyperparams["history_sec"]),
+            base_collate=base_collate),
         pin_memory=False if hyperparams["device"] == "cpu" else True,
         batch_size=batch_size,
         shuffle=True,
@@ -148,6 +225,6 @@ def main():
 if __name__ == '__main__':
     batch = main()
     print(f"Num of agents in scenes: {batch.num_agents}")
-    print(f"Shape of all current states array: {batch.extras['curr_states'].shape}")
+    # print(f"Shape of all current states array: {batch.extras['curr_states'].shape}")
     print(f"Shape of is_neigh array: {batch.extras['is_neigh'].shape}")
-    # print(f"Shape of neigh hist array: {batch.extras['neigh_hist'].shape}")
+    print(f"Shape of neigh hist array: {batch.extras['neigh_hist'].shape}")
