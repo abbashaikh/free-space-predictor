@@ -10,9 +10,11 @@
 #include <fstream>
 #include <boost/format.hpp>
 
+#include <string>
 #include <vector>
 #include <tuple>
 #include <cmath>
+#include <variant>
 
 // for CGAL::Nef_polyhedron_2
 #include <CGAL/Exact_integer.h>
@@ -27,6 +29,7 @@
 
 // Namespace & Type Definitions
 namespace py = pybind11;
+using namespace pybind11::literals;
 
 // For CGAL::Nef_polyhedron_2
 // Define the kernel and Nef polyhedron types
@@ -58,92 +61,141 @@ typedef PS::Squared_distance_cost            Cost;
 // This class is responsible for processing halfplane intersections and calculating the support size
 class HalfplaneIntersectionProcessor {
 public:
+    // Constructor
     HalfplaneIntersectionProcessor(int scene_size, double cost_threshold)
         : sceneSize(scene_size), costThreshold(cost_threshold), logger(nullptr) {}
 
-        void set_logger(Logger* log_ptr) {
-            logger = log_ptr;
+    // Initiate logger
+    void set_logger(Logger* log_ptr) {
+        logger = log_ptr;
+    }
+
+    // To calculate support size
+    int get_support_size(py::array_t<double> lines_array) {
+        std::vector<Line> lines = {
+            {1.0, 0.0, sceneSize/2.0},
+            {-1.0, 0.0, sceneSize/2.0},
+            {0.0, 1.0, sceneSize/2.0},
+            {0.0, -1.0, sceneSize/2.0}
+        }; // bound our area of interest
+
+        auto array_ref = lines_array.unchecked<2>();
+        if (array_ref.ndim() != 2 || array_ref.shape(1) != 3) {
+            throw std::runtime_error("Input array must be of shape (n, 3)");
+        }
+        if (array_ref.shape(0) == 0) {
+            throw std::runtime_error("No constraint lines provided.");
+        }
+        for (ssize_t i = 0; i < array_ref.shape(0); ++i) {
+            std::vector<double> coeffs;
+            for (ssize_t j = 0; j < array_ref.shape(1); ++j) {
+                coeffs.push_back(array_ref(i, j));
+            }
+            double a = coeffs[0];
+            double b = coeffs[1];
+            double c = coeffs[2];
+            // ax + by + c >= 0 (2 decimal place precision)
+            lines.emplace_back(Line(a * 100, b * 100, c * 100));
+        }
+    
+        Nef_polyhedron intersection_poly = intersect_halfspaces(lines);
+        auto poly_vertices = explore(intersection_poly);
+        auto simplified_vertices = simplify_polygon(poly_vertices);
+        return count_edges(simplified_vertices);
+    }
+
+    py::array_t<int> get_support_sizes(py::array_t<double> lines_3d) {
+        auto arr = lines_3d.unchecked<3>();
+        if (arr.ndim() != 3 || arr.shape(2) != 3) {
+            throw std::runtime_error(
+                "Input must be a 3‐D array with shape (T, N, 3)");
         }
 
-        int get_support_size(py::array_t<double> lines_array) {
+        ssize_t T = arr.shape(0);
+        ssize_t N = arr.shape(1);
+
+        // prepare output length‐T
+        py::array_t<int> out({ T });
+        auto out_mut = out.mutable_unchecked<1>();
+
+        for (ssize_t t = 0; t < T; ++t) {
             std::vector<Line> lines;
-    
-            auto array_ref = lines_array.unchecked<2>();
-            if (array_ref.ndim() != 2 || array_ref.shape(1) != 3) {
-                throw std::runtime_error("Input array must be of shape (n, 3)");
-            }
-            if (array_ref.shape(0) == 0) {
-                throw std::runtime_error("No constraint lines provided.");
-            }
-            for (ssize_t i = 0; i < array_ref.shape(0); ++i) {
-                std::vector<double> coeffs;
-                for (ssize_t j = 0; j < array_ref.shape(1); ++j) {
-                    coeffs.push_back(array_ref(i, j));
-                }
-                double a = coeffs[0];
-                double b = coeffs[1];
-                double c = coeffs[2];
-                // ax + by + c <= 0 (2 decimal place precision)
+            lines.reserve(N);
+
+            // build lines for time‐slice t
+            for (ssize_t i = 0; i < N; ++i) {
+                double a = arr(t, i, 0);
+                double b = arr(t, i, 1);
+                double c = arr(t, i, 2);
+                // ax + by + c >= 0 (2 decimal place precision)
                 lines.emplace_back(Line(a * 100, b * 100, c * 100));
             }
-        
+
             Nef_polyhedron intersection_poly = intersect_halfspaces(lines);
             auto poly_vertices = explore(intersection_poly);
             auto simplified_vertices = simplify_polygon(poly_vertices);
-            return count_edges(simplified_vertices);
+            int support = count_edges(simplified_vertices);
+
+            out_mut(t) = support;
         }
+
+        return out;
+    }
 
 private:
-        int sceneSize;
-        double costThreshold;
-        Logger* logger;
-    
-        void log(const std::string& msg) const {
-            if (logger) logger->log(msg);
-        }
-    
-        Nef_polyhedron intersect_halfspaces(const std::vector<Line>& lines) {
-            Nef_polyhedron result(Nef_polyhedron::COMPLETE);
-            
-            // std::ostringstream ss;
-            for (size_t i = 0; i < lines.size(); ++i) {
-                const Line& l = lines[i];
-        
-                // Log the line equation: ax + by + c >= 0
-                // ss << "Half-space " << i << ": " << l.a() << "x + " << l.b() << "y + " << l.c() << " >= 0 | ";
+    // 2D-point using double type
+    struct DTuple {
+        double x, y;
+        DTuple(double _x, double _y): x(_x), y(_y) {}
+    };
+    // Constants
+    int sceneSize;
+    double costThreshold;
+    Logger* logger;
+    double tol = 1e-4;
 
-                Nef_polyhedron hs(l, Nef_polyhedron::INCLUDED);
-                result *= hs;
-        
-                if (result.is_empty()) {
-                    break;
-                }
+    // Logger
+    void log(const std::string& msg) const {
+        if (logger) logger->log(msg);
+    }
+    
+    // Intersection of half-spaces
+    Nef_polyhedron intersect_halfspaces(const std::vector<Line>& lines) {
+        Nef_polyhedron result(Nef_polyhedron::COMPLETE);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const Line& l = lines[i];
+
+            Nef_polyhedron hs(l, Nef_polyhedron::INCLUDED);
+            result *= hs;
+    
+            if (result.is_empty()) {
+                throw std::runtime_error ("Intersection of halfspaces is empty!");
+            }
+        }
+        return result;
+    }
+
+    // Explore Nef Polygon
+    std::vector<DTuple> explore(const Nef_polyhedron& poly) {
+        log("Explore Intersection Polygon: ");
+
+        std::vector<DTuple> poly_vertices;
+        std::ostringstream oss;
+
+        Explorer explorer = poly.explorer();
+        int i = 0;
+        for(Face_const_iterator fit = explorer.faces_begin(); fit != explorer.faces_end(); ++fit, i++){
+            if (!explorer.mark(fit)) {
+                oss << "Face " << i << " is not marked" << std::endl;
+                continue;
             }
 
-            // log(ss.str());
-            return result;
-        }
-
-        std::vector<std::pair<double, double>> explore(const Nef_polyhedron& poly) {
-            log("Explore Intersection Polygon: ");
-    
-            std::vector<std::pair<double, double>> poly_vertices;
-            std::ostringstream oss;
-    
-            Explorer explorer = poly.explorer();
-            int i = 0;
-            for(Face_const_iterator fit = explorer.faces_begin(); fit != explorer.faces_end(); ++fit, i++){
-                if (!explorer.mark(fit)) {
-                    oss << "Face " << i << " is not marked" << std::endl;
-                    continue;
-                }
-
-                oss << "Face " << i << " is marked" << std::endl;
-                // explore the outer face cycle if it exists
-                Halfedge_around_face_const_circulator hafc = explorer.face_cycle(fit);
-                if(hafc == Halfedge_around_face_const_circulator()){
+            oss << "Face " << i << " is marked" << std::endl;
+            // explore the outer face cycle if it exists
+            Halfedge_around_face_const_circulator hafc = explorer.face_cycle(fit);
+            if(hafc == Halfedge_around_face_const_circulator()){
                 oss << "* has no outer face cycle" << std::endl;
-                } else {
+            } else {
                 oss << "* outer face cycle" << std::endl;
                 oss << "  - halfedges around the face: " << std::endl;
                 Halfedge_around_face_const_circulator done(hafc);
@@ -154,158 +206,137 @@ private:
                 }while (hafc != done);
                 oss << " ( f = frame edge, e = ordinary edge)" << std::endl;
 
+                // We only need outer vertices of marked faces
                 oss << "  - vertices around the face: " << std::endl;
                 do {
                     Vertex_const_handle vh = explorer.target(hafc);
                     if (explorer.is_standard(vh)){
-                    Point vertex = explorer.point(vh);
-                    double vx = CGAL::to_double(vertex.x());
-                    double vy = CGAL::to_double(vertex.y());
+                        Point pt = explorer.point(vh);
 
-                    oss << "      Point: " << "(" << vx << "," << vy << ")" << std::endl;
-                    
-                    poly_vertices.emplace_back(vx,vy);
-                    }else{
-                    Ray ray = explorer.ray(vh);
-                    Point source_point = ray.source();
-                    double sx = CGAL::to_double(source_point.x());
-                    double sy = CGAL::to_double(source_point.y());
+                        double px = CGAL::to_double(pt.x());
+                        double py = CGAL::to_double(pt.y());
+                        oss << "      Point: " << "(" << px << "," << py << ")" << std::endl;
 
-                    Point direction = ray.point(1);
-                    double dx = CGAL::to_double(direction.x()); // x-component of direction
-                    double dy = CGAL::to_double(direction.y()); // y-component of direction
-                    oss << "      Ray: " << "(" << sx << "," << sy << ")" << "->" << "(" << dx << "," << dy << ")" << std::endl;
-                    
-                    double delX = dx - sx;
-                    double delY = dy - sy;
-                    double vx, vy;
-                    double tol = 1e-3;
-                    if (std::fabs(delX) > tol) {
-                        double m = delY / delX;
-                        double c = sy - m*sx;
-                        if (delX > 0){
-                            vx = this->sceneSize/2;
-                            vy = m*vx + c;
-                        }else {
-                            vx = -this->sceneSize/2;
-                            vy = m*vx + c;
-                        }               
-                    }else{
-                        vx = sx;
-                        if (delY > 0) { 
-                            vy = this->sceneSize/2;
-                        }else {
-                            vy = -this->sceneSize/2;
-                        } 
-                    }
-                    poly_vertices.emplace_back(vx,vy);
+                        poly_vertices.emplace_back(px, py); // add to polygon vertices vector
+                    } else {
+                        oss << "      Ray: " << explorer.ray(vh);
+                        throw std::runtime_error ("We never encounter a Ray on account of our bounded frame!");
                     }
                     ++hafc;
                 }while (hafc != done);
-                }
+            }
 
-                // explore the holes if the face has holes
-                Hole_const_iterator hit = explorer.holes_begin(fit), end = explorer.holes_end(fit);
-                if(hit == end){
+            // explore the holes if the face has holes
+            Hole_const_iterator hit = explorer.holes_begin(fit), end = explorer.holes_end(fit);
+            if(hit == end){
                 oss << "* has no holes" << std::endl;
-                }else{
+            } else {
                 oss << "* has holes" << std::endl;
                 for(; hit != end; hit++){
                     Halfedge_around_face_const_circulator hafc(hit), done(hit);
                     oss << "  - halfedges around the hole: " << std::endl;
                     do {
-                    char c = (explorer.is_frame_edge(hafc))?'f':'e';
-                    oss << c;
-                    ++hafc;
+                        char c = (explorer.is_frame_edge(hafc))?'f':'e';
+                        oss << c;
+                        ++hafc;
                     }while (hafc != done);
                     oss << " ( f = frame edge, e = ordinary edge)" << std::endl;
                 }
-                }
             }
-            oss << "done";
-            log(oss.str());
-            return poly_vertices;
+        }
+        oss << "done";
+        log(oss.str());
+
+        return poly_vertices;
+    }
+    
+    // simplify polygon (merge small neighboring edges)
+    std::vector<DTuple> simplify_polygon(const std::vector<DTuple>& poly_vertices) {
+        // Convert to CGAL::Polygon_2
+        Polygon_2 polygon;
+
+        for (const auto& point : poly_vertices) {
+            polygon.push_back(K::Point_2(point.x, point.y));
         }
 
-        std::vector<std::pair<double, double>> simplify_polygon(const std::vector<std::pair<double, double>>& poly_vertices) {
-            if (poly_vertices.empty()) {
-                log("[WARN] simplify_polygon: Received empty polygon vertices.");
-            }
-            
-            // Convert to CGAL::Polygon_2
-            Polygon_2 polygon;
-
-            for (const auto& point : poly_vertices) {
-                polygon.push_back(K::Point_2(point.first, point.second));
-            }
-    
-            if (polygon.size() < 3) {
-                log("[WARN] simplify_polygon: Not enough vertices to form a polygon.");
-                return poly_vertices;
-            }
-    
+        if (! polygon.is_simple()) {
+            throw std::runtime_error ("simplify_polygon: Polgon edges intersect!");
+        } else {
             // Simplify the polygon
             Cost cost;
-            polygon = PS::simplify(polygon, cost, Stop(this->costThreshold));
 
-            std::vector<std::pair<double, double>> simplified_vertices;
+            if (polygon.size() > 2) {
+                polygon = PS::simplify(polygon, cost, Stop(costThreshold));
+            }
 
-            log("Simplified Polygon Vertices: ");
+            std::vector<DTuple> simplified_vertices;
+
             std::ostringstream oss;
+            oss << "Simplified Polygon Vertices:";
             for (auto it = polygon.vertices_begin(); it != polygon.vertices_end(); ++it) {
                 double x = it->x();
                 double y = it->y();
-                simplified_vertices.push_back({x, y});
-                oss << "x: " << x << ", y: " << y << std::endl;
+                simplified_vertices.emplace_back(x, y);
+                oss << " (" << x << ", " << y << ") ;";
             }
             log(oss.str());
-            if (!simplified_vertices.empty()) {
-                simplified_vertices.push_back({simplified_vertices[0].first, simplified_vertices[0].second}); // Close the polygon
+
+            if (simplified_vertices.size()>2) {
+                simplified_vertices.emplace_back(
+                    simplified_vertices[0].x, simplified_vertices[0].y
+                ); // Close the polygon
             }
+
             return simplified_vertices;
         }
+    }
 
-        int count_edges(const std::vector<std::pair<double,double>>& simplified_vertices) {
-            int support_size = 0;
-        
-            for (size_t i = 0; i < simplified_vertices.size() - 1; ++i) {
-                size_t j = i + 1;
+    // calculate support from edges
+    int count_edges(const std::vector<DTuple>& simplified_vertices) {
+        int support_size = 0;
     
-                double x1 = simplified_vertices[i].first;
-                double y1 = simplified_vertices[i].second;
-                double x2 = simplified_vertices[j].first;
-                double y2 = simplified_vertices[j].second;
-    
-                if (std::abs(std::abs(x1) - std::abs(x2)) < 1e-5 &&
-                    std::abs(std::abs(x1) - this->sceneSize/2) < 1e-5) {
-                    continue; // Skip vertical lines at the edges
-                }
-                if (std::abs(std::abs(y1) - std::abs(y2)) < 1e-5 &&
-                    std::abs(std::abs(y1) - this->sceneSize/2) < 1e-5) {
-                    continue; // Skip horizontal lines at the edges
-                }
-                if (std::abs(x1) >= this->sceneSize/2 &&
-                    std::abs(y1) >= this->sceneSize/2 &&
-                    std::abs(x2) >= this->sceneSize/2 &&
-                    std::abs(y2) >= this->sceneSize/2) {
-                    continue; // Skip edges outside the scene
-                }
+        for (size_t i = 0; i < simplified_vertices.size() - 1; ++i) {
+            size_t j = i + 1;
+
+            double x1 = simplified_vertices[i].x;
+            double y1 = simplified_vertices[i].y;
+            double x2 = simplified_vertices[j].x;
+            double y2 = simplified_vertices[j].y;
+
+            if (std::abs(x1 - x2) < tol &&
+                std::abs(std::abs(x1) - sceneSize/2) < tol) {
+                continue; // skip vertical lines at the edges
+            }
+            else if (std::abs(y1 - y2) < tol &&
+                std::abs(std::abs(y1) - sceneSize/2) < tol) {
+                continue; // skip horizontal lines at the edges
+            } else {
                 support_size += 1;
             }
-            log("Calculated Support Size: " + std::to_string(support_size));
-            return support_size;
         }
+        log("Calculated Support Size: " + std::to_string(support_size) + "\n");
+        return support_size;
+    }
 };
 
 // create python binding
 PYBIND11_MODULE(halfplane_module, m) {
     py::class_<Logger>(m, "Logger")
-        .def(py::init<const std::string&, bool>())
+        .def(py::init<const std::string&, bool>(),
+            "log_file"_a,
+             "enabled"_a = false
+        )
         .def("log", &Logger::log)
         .def("enable", &Logger::enable);
 
     py::class_<HalfplaneIntersectionProcessor>(m, "HalfplaneIntersectionProcessor")
-        .def(py::init<int, double>())
-        .def("get_support_size", &HalfplaneIntersectionProcessor::get_support_size)
-        .def("set_logger", &HalfplaneIntersectionProcessor::set_logger, py::return_value_policy::reference);
+        .def(py::init<int, double>(),
+            "scene_size"_a,
+            "tolerance"_a
+        )
+        .def("set_logger", &HalfplaneIntersectionProcessor::set_logger, py::return_value_policy::reference)
+        .def("get_support_size", &HalfplaneIntersectionProcessor::get_support_size,
+            "Compute support size for a single (N,3) array")
+        .def("get_support_sizes", &HalfplaneIntersectionProcessor::get_support_sizes,
+            "Compute support sizes for each time‐slice in a (N,T,3) or (T,N,3) array");
 }
