@@ -12,6 +12,7 @@ from .utils import (
     is_within_distance,
     get_constraint_coeffs,
     check_symmetric,
-    transform_coords_np
+    transform_coords_np,
+    load_model
 )
 from .scene_processor import SceneProcessor

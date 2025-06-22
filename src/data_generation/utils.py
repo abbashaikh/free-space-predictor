@@ -1,7 +1,13 @@
 '''Helper Functions'''
 import warnings
+from pathlib import Path
+from typing import Dict, Any
 
 import numpy as np
+import torch
+
+from traj_pred.modules import ModelRegistrar
+from traj_pred import TrajectoryPredictor
 
 ####### To Calculate Number of Samples #######
 def bisection(N_low, N_high, sample_function): 
@@ -161,3 +167,55 @@ def transform_coords_np(coords: np.ndarray, tf: np.ndarray,) -> np.ndarray:
     # Back to (M, N, 3), then drop the homogeneous coordinate
     transformed = transformed_h.transpose(0, 2, 1)[..., :2]
     return transformed
+
+
+def find_latest_checkpoint(model_dir: Path, epoch: int) -> Path:
+    """
+    Starting from `epoch`, search downward for the first existing
+    'model_registrar-{epoch}.pt' file.
+    """
+    for e in range(epoch, 0, -1):
+        candidate = model_dir / f"model_registrar-{e}.pt"
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"No checkpoint found in {model_dir} up to epoch {epoch}"
+    )
+
+
+def load_model(
+    model_dir: str,
+    epoch: int,
+    hyperparams: Dict[str, Any],
+) -> TrajectoryPredictor:
+    """
+    Loads the latest checkpoint (≤ epoch) into a TrajectoryPredictor.
+    
+    Args:
+        model_dir: Directory containing 'model_registrar-<N>.pt' files.
+        epoch:  Maximum epoch number to consider.
+        hyperparams: Dict
+    """
+    model_dir_path = Path(model_dir)
+    if not model_dir_path.is_dir():
+        raise NotADirectoryError(f"{model_dir} is not a valid directory")
+
+    # Find checkpoint file
+    ckpt_path = find_latest_checkpoint(model_dir_path, epoch)
+
+    # Initialize registrar & model
+    device = hyperparams.get("device", torch.device("cpu"))
+    registrar = ModelRegistrar(str(model_dir_path), device)
+    predictor = TrajectoryPredictor(
+        model_registrar=registrar,
+        hyperparams=hyperparams,
+        log_writer=None,
+        device=device,
+    )
+    predictor.set_environment()
+
+    # Load weights
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    predictor.load_state_dict(checkpoint["model_state_dict"], strict=False)
+
+    return predictor

@@ -120,57 +120,58 @@ class SceneProcessor:
 
         return transformed
 
-    def _get_robot_positions(
+    def _get_support_estimate(
             self,
-            agent_pos: np.ndarray,  # [M, T, 2]
-            samples_per_scene=1
-    ) -> np.ndarray:
+            agent_pos: np.ndarray,      # [M, T, 2]
+            ego_positions: np.ndarray # [samples, 2]
+        ) -> np.ndarray:
+        agent_pos = np.transpose(agent_pos, (1, 0, 2))  # [T, M, 2]
+
+        T = agent_pos.shape[0]
+        num_samples = ego_positions.shape[0]
+        support_estimates = np.zeros((num_samples, T), dtype=int)
+
+        for idx, ego_pos in enumerate(ego_positions):
+            coeffs = get_constraint_coeffs(ego_pos, agent_pos, self.col_radius)   # [T, M, 3]
+            support_estimates[idx, :] = self.processor.get_support(coeffs)          # [T,]
+
+        return support_estimates.max(axis=1)    # [num_samples,]
+
+    def get_ego_positions(self, samples_per_scene=1) -> np.ndarray:
+        '''Get ego positions for the given scene'''
+        agent_pos = self._get_true_future() # [M, T, 2]
         agent_pos = agent_pos.reshape(-1, 2)
         valid = ~np.isnan(agent_pos).any(axis=1)
         agent_pos = agent_pos[valid]
 
         radius = self.col_radius + 0.5
 
-        robot_positions = np.zeros((samples_per_scene, 2), dtype=agent_pos.dtype)
+        ego_positions = np.zeros((samples_per_scene, 2), dtype=agent_pos.dtype)
         for idx in range(samples_per_scene):
-            while True: # Generate a random position for the robot
-                # Ensure the robot's position does not overlap with any occupied positions
-                robot_pos = np.array([
+            while True: # Generate a random position for the ego
+                # Ensure the ego's position does not overlap with any occupied positions
+                ego_pos = np.array([
                     random.uniform(-self.scene_limits-2.0, self.scene_limits-2.0),
                     random.uniform(-self.scene_limits-2.0, self.scene_limits-2.0)
                 ], dtype=agent_pos.dtype)
 
-                in_collision = is_within_distance(agent_pos, robot_pos, radius)
+                in_collision = is_within_distance(agent_pos, ego_pos, radius)
                 if not np.any(in_collision):
-                    robot_positions[idx, :] = robot_pos
+                    ego_positions[idx, :] = ego_pos
                     break
-        return robot_positions
+        return ego_positions
 
-    def _get_support_estimate(
+    def scene_supports(
             self,
-            agent_pos: np.ndarray,      # [M, T, 2]
-            robot_positions: np.ndarray # [samples, 2]
-        ) -> np.ndarray:
-        agent_pos = np.transpose(agent_pos, (1, 0, 2))  # [T, M, 2]
-
-        T = agent_pos.shape[0]
-        num_samples = robot_positions.shape[0]
-        support_estimates = np.zeros((num_samples, T), dtype=int)
-
-        for idx, robot_pos in enumerate(robot_positions):
-            coeffs = get_constraint_coeffs(robot_pos, agent_pos, self.col_radius)   # [T, M, 3]
-            support_estimates[idx, :] = self.processor.get_support(coeffs)          # [T,]
-
-        return support_estimates.max(axis=1)    # [num_samples,]
-
-    def scene_supports(self, samples_per_scene=5, risk=0.05, confidence=0.01) -> np.ndarray:
+            ego_positions,    # [num_samples, 2]
+            risk=0.05,
+            confidence=0.01
+    ) -> np.ndarray:
         '''Get support for all ego agent samples in a given scene'''
         batch = self.batch
 
         agent_pos = self._get_true_future()
-        robot_positions = self._get_robot_positions(agent_pos, samples_per_scene)   # [num_samples, 2]
-
-        support_estimates = self._get_support_estimate(agent_pos, robot_positions)  # [num_samples,]
+        support_estimates = self._get_support_estimate(agent_pos, ego_positions)  # [num_samples,]
 
         #TODO: Currently used for pedestrian datasets only!
         agent_type = AgentType.PEDESTRIAN
@@ -184,7 +185,7 @@ class SceneProcessor:
         ]
 
         for idx, support in enumerate(support_estimates):
-            robot_pos = robot_positions[idx]
+            ego_pos = ego_positions[idx]
 
             calc_support = float('inf')
             est_support = support-1
@@ -217,7 +218,7 @@ class SceneProcessor:
                 N = M * S
                 flat_preds = per_step_pred.reshape(T, N, 2)
 
-                pred_coeffs = get_constraint_coeffs(robot_pos, flat_preds, self.col_radius) # [T, M, 3]
+                pred_coeffs = get_constraint_coeffs(ego_pos, flat_preds, self.col_radius) # [T, M, 3]
                 supports = self.processor.get_support(pred_coeffs)    # [T,]
 
                 calc_support = max(supports)
