@@ -292,9 +292,9 @@ class MultimodalGenerativeCVAE(nn.Module):
                 p=1.0 - self.hyperparams["rnn_kwargs"]["dropout_keep_prob"],
                 training=(mode == ModeKeys.TRAIN),
             )
-        
+
         return combined_edges
-    
+
     def obtain_encoded_tensors(
         self, mode: ModeKeys, batch: AgentBatch
     ) -> Tuple[
@@ -899,4 +899,3 @@ class MultimodalGenerativeCVAE(nn.Module):
             return y_dist, our_sampled_future
         else:
             return our_sampled_future
-

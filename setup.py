@@ -79,7 +79,7 @@ setup(
     description="Scenario optimization based social navigation",
     author="Abbas Shaikh",
     author_email="abbas22shk@gmail.com",
-    url="https://github.com/abbashaikh/free-space-social-navigation.git",
+    url="https://github.com/abbashaikh/fsp.git",
     python_requires=">=3.9",
     packages=find_packages(where='src'),
     package_dir={'': 'src'},

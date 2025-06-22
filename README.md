@@ -10,7 +10,7 @@ git clone <repository cloning URL>
 ### Environment Setup ###
 Create a conda environment and install dependencies
 ```sh
-conda create --name fsp python=3.9 -y
+conda create -n fsp -c conda-forge python=3.9 cmake
 conda activate fsp
 pip install -r requirements.txt
 ```
@@ -23,7 +23,7 @@ tar xf CGAL-6.0.1.tar.xz
 and move the directory to a suitable location (for example, `/usr/local/lib`).
 
 ### Local Packages and C++ Extensions ###
-Update the CMake argument `DCGAL_DIR` to match the location of your CGAL installation, then run the following from the project's root directory:
+Update the CMake argument `DCGAL_DIR` (line 43 in `setup.py`) to match the location of your CGAL installation, then run the following from the project's root directory:
 ```sh
 pip install .
 ```
@@ -38,10 +38,10 @@ To train a model on the ETH and UCY Pedestrian datasets, execute the relevant co
 
 **NOTE:** Make sure that you specify the correct directory for `--trajdata_cache_dir` (where trajdata's cache is located). The provided values in the shell script are examples, but you can choose whatever suits your computing environment best.
 
-For example, running this command from within `traj_pred/` will train the trajectory prediction model on the ETH Univ dataset.
+For example, running this command from within the project's root directory will train the trajectory prediction model on the ETH Univ dataset.
 
 ```sh
-torchrun --nproc_per_node=1 --master_port=29500 train.py \
+torchrun --nproc_per_node=1 --master_port=29500 src/traj_pred/train.py \
         --eval_every=1 \
         --vis_every=1 \
         --batch_size=256 \

@@ -5,12 +5,13 @@ from typing import Any, Dict, List, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from trajdata import AgentBatch, SceneBatch, AgentType
+from trajdata import AgentBatch, AgentType
 
 from traj_pred.modules.mgcvae import MultimodalGenerativeCVAE
 from traj_pred.modules.snce import SocialNCE
 from traj_pred.utils.evaluation import compute_batch_statistics_pt
 from traj_pred.utils.annealing import step_annealers, set_annealing_params
+from traj_pred.utils.model_utils import ModeKeys
 
 class TrajectoryPredictor(nn.Module):
     """
@@ -252,40 +253,35 @@ class TrajectoryPredictor(nn.Module):
 
             # Assign predictions to node
             for i, agent_name in enumerate(agent_type_batch.agent_name):
-                predictions_dict[f"{str(node_type)}/{agent_name}"] = predictions_np[
-                    :, i
-                ]
+                data_idx = agent_type_batch.data_idx[i]
+                scene_ts = agent_type_batch.scene_ts[i]
+                predictions_dict[
+                    f"{str(node_type)}/agent_{agent_name}/idx_{data_idx}/ts_{scene_ts}"
+                ] = predictions_np[:, i]
                 if output_dists:
-                    dists_dict[f"{str(node_type)}/{agent_name}"] = y_dists.get_for_node(
-                        i
-                    )
+                    dists_dict[
+                        f"{str(node_type)}/agent_{agent_name}/idx_{data_idx}/ts_{scene_ts}"
+                    ] = y_dists.get_for_node(i)
 
         if output_dists:
             return dists_dict, predictions_dict
         else:
             return predictions_dict
-        
-    def get_encoding(self, batch: SceneBatch):
+
+    def get_scene_encoding(
+        self,
+        batch #: SceneAgentBatch
+    ):
         """
-        Get encodings for all agents in a scene
-        (works only with batch_size==1)
+        Returns encodings from MG_CVAE
 
         Args:
-            batch (SceneBatch): information of all agents in a scene
+            batch (SceneAgentBatch/AgentBatch): information of all agents in a scene
         """
+        mode = ModeKeys.PREDICT
         node_type: AgentType
         for node_type in batch.agent_types():
             model: MultimodalGenerativeCVAE = self.node_models_dict[node_type.name]
-            enc, _, _, _, _ = model.obtain_encoded_tensors(batch)
+            agent_type_batch = batch.for_agent_type(node_type)
+            enc, _, _, _, _ = model.obtain_encoded_tensors(mode, agent_type_batch)
         return enc
-
-    def incremental_forward(
-        self,
-        batch: SceneBatch,
-        prediction_horizon,
-        num_samples,
-        full_dist=False
-    ):
-        """Predict future of all agents in a scene"""
-        #TODO
-        return None

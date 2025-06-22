@@ -70,41 +70,7 @@ public:
         logger = log_ptr;
     }
 
-    // To calculate support size
-    int get_support_size(py::array_t<double> lines_array) {
-        std::vector<Line> lines = {
-            {1.0, 0.0, sceneSize/2.0},
-            {-1.0, 0.0, sceneSize/2.0},
-            {0.0, 1.0, sceneSize/2.0},
-            {0.0, -1.0, sceneSize/2.0}
-        }; // bound our area of interest
-
-        auto array_ref = lines_array.unchecked<2>();
-        if (array_ref.ndim() != 2 || array_ref.shape(1) != 3) {
-            throw std::runtime_error("Input array must be of shape (n, 3)");
-        }
-        if (array_ref.shape(0) == 0) {
-            throw std::runtime_error("No constraint lines provided.");
-        }
-        for (ssize_t i = 0; i < array_ref.shape(0); ++i) {
-            std::vector<double> coeffs;
-            for (ssize_t j = 0; j < array_ref.shape(1); ++j) {
-                coeffs.push_back(array_ref(i, j));
-            }
-            double a = coeffs[0];
-            double b = coeffs[1];
-            double c = coeffs[2];
-            // ax + by + c >= 0 (2 decimal place precision)
-            lines.emplace_back(Line(a * 100, b * 100, c * 100));
-        }
-    
-        Nef_polyhedron intersection_poly = intersect_halfspaces(lines);
-        auto poly_vertices = explore(intersection_poly);
-        auto simplified_vertices = simplify_polygon(poly_vertices);
-        return count_edges(simplified_vertices);
-    }
-
-    py::array_t<int> get_support_sizes(py::array_t<double> lines_3d) {
+    py::array_t<int> get_support(py::array_t<double> lines_3d) {
         auto arr = lines_3d.unchecked<3>();
         if (arr.ndim() != 3 || arr.shape(2) != 3) {
             throw std::runtime_error(
@@ -120,14 +86,26 @@ public:
 
         for (ssize_t t = 0; t < T; ++t) {
             std::vector<Line> lines;
-            lines.reserve(N);
+            lines.reserve(N+4);
+
+            // bound constraints our area of interest
+            lines.emplace_back( 1.0,  0.0,  sceneSize/2.0);
+            lines.emplace_back(-1.0,  0.0,  sceneSize/2.0);
+            lines.emplace_back( 0.0,  1.0,  sceneSize/2.0);
+            lines.emplace_back( 0.0, -1.0,  sceneSize/2.0);
 
             // build lines for time‐slice t
             for (ssize_t i = 0; i < N; ++i) {
-                double a = arr(t, i, 0);
-                double b = arr(t, i, 1);
-                double c = arr(t, i, 2);
                 // ax + by + c >= 0 (2 decimal place precision)
+                int a = static_cast<int>(std::round(arr(t, i, 0) * 100.0));
+                int b = static_cast<int>(std::round(arr(t, i, 1) * 100.0));
+                int c = static_cast<int>(std::round(arr(t, i, 2) * 100.0));
+
+                // NaN handling
+                if (a == 0 && b == 0 && c == 0) {
+                    continue;
+                }
+                
                 lines.emplace_back(Line(a * 100, b * 100, c * 100));
             }
 
@@ -139,7 +117,7 @@ public:
             out_mut(t) = support;
         }
 
-        return out;
+        return out; // output array shape: [T,]
     }
 
 private:
@@ -335,8 +313,6 @@ PYBIND11_MODULE(halfplane_module, m) {
             "tolerance"_a
         )
         .def("set_logger", &HalfplaneIntersectionProcessor::set_logger, py::return_value_policy::reference)
-        .def("get_support_size", &HalfplaneIntersectionProcessor::get_support_size,
-            "Compute support size for a single (N,3) array")
-        .def("get_support_sizes", &HalfplaneIntersectionProcessor::get_support_sizes,
-            "Compute support sizes for each time‐slice in a (N,T,3) or (T,N,3) array");
+        .def("get_support", &HalfplaneIntersectionProcessor::get_support,
+            "Compute support size for each time slice in a (T,N,3) constraints array");
 }

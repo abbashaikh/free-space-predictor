@@ -27,7 +27,7 @@ from traj_pred.modules import ModelRegistrar
 from traj_pred import TrajectoryPredictor
 from traj_pred.utils import evaluation
 # from utils import visualization_utils
-from traj_pred.utils import args
+from traj_pred.utils.argument_parser import args
 from traj_pred.utils.comm import all_gather
 
 # TODO: For nuScenes dataset
