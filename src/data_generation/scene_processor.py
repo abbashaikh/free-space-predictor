@@ -1,5 +1,6 @@
 '''SceneProcessor class'''
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 import random
 import numpy as np
@@ -57,14 +58,6 @@ class SceneProcessor:
             tolerance=support_tolearance
         )
         self.processor.set_logger(self.logger)
-
-        # data_keys = ["Data ID", "Scene Timestep", "Scene ID", "Agent Name", "Encoding", "Ego", "Support Size"]
-        # self.support_data: Dict[str, Any] = dict.fromkeys(data_keys, None)
-    
-    
-    # def _store_agent_data(self) -> None:
-    #     enc = self.model.get_scene_encoding(self.batch)
-    #     self.support_data["Encodings"] = enc
 
     def _find_latest_checkpoint(self, model_dir: Path, epoch: int) -> Path:
         """
@@ -233,54 +226,3 @@ class SceneProcessor:
 
         return support_estimates
 
-    def _test_support_generation(self, samples_per_scene=1, predictions=1):
-        batch = self.batch
-
-        flat_pos, _ = self._get_true_future()
-        robot_position = self._get_robot_positions(flat_pos, samples_per_scene)
-        self.logger.log(f"Robot Position: {robot_position}")
-
-        #TODO: Currently used for pedestrian datasets only!
-        agent_type = AgentType.PEDESTRIAN
-        names = batch.agent_name
-        data_ids = batch.data_idx
-        timestamps = batch.scene_ts
-
-        keys = [
-            f"{str(agent_type)}/agent_{name}/idx_{id.item()}/ts_{ts.item()}"
-            for name, id, ts in zip(names, data_ids, timestamps)
-        ]
-
-        S = predictions
-        predictions_dict: Dict[str, np.ndarray] = self.model.predict(
-                    batch=batch,
-                    num_samples=S,
-                    prediction_horizon=self.prediction_horizon,
-                    full_dist=True,
-                    output_dists=False
-                )
-
-        per_agent_pred = [predictions_dict[k] for k in keys]
-        pred_array = np.stack(per_agent_pred, axis=0)  # (M, S, T, 2)
-
-        M, S, T, D = pred_array.shape
-        pred_array_flat = pred_array.reshape(M, S*T, D)
-
-        transforms = batch.world_from_agent_tf # [M, 3, 3]
-        transformed = transform_coords_np(pred_array_flat, transforms) # [M, S*T, 2]
-
-        tmp = transformed.reshape(M, S, T, D)
-        per_step_pred = np.transpose(tmp, (2, 0, 1, 3)) # (T, M, S, 2)
-
-        N = M * S
-        flat_preds = per_step_pred.reshape(T, N, 2)
-
-        pred_coeffs = get_constraint_coeffs(
-            robot_position.squeeze(),
-            flat_preds,
-            self.col_radius
-        )
-
-        supports = self.processor.get_support_sizes(pred_coeffs)
-
-        return robot_position.squeeze(), flat_preds, pred_coeffs, supports
