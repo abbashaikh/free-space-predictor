@@ -16,7 +16,7 @@
 import torch
 import torch.distributions as td
 
-from traj_pred.utils.model_utils import to_one_hot
+from fsp.utils.model_utils import to_one_hot
 
 
 class GMM2D(td.MixtureSameFamily):

@@ -2,15 +2,13 @@ import math
 from typing import Optional, Tuple
 
 import torch
-from fairseq import utils
-from fairseq.modules.fairseq_dropout import FairseqDropout
-from fairseq.modules.quant_noise import quant_noise
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 
 class MultiheadAttention(nn.Module):
-    """Multi-headed attention.
-
+    """
+    Multi-headed attention.
     See "Attention Is All You Need" for more details.
     """
 
@@ -23,8 +21,7 @@ class MultiheadAttention(nn.Module):
         dropout=0.0,
         bias=True,
         self_attention=False,
-        q_noise=0.0,
-        qn_block_size=8,
+        batch_first=False
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -33,9 +30,6 @@ class MultiheadAttention(nn.Module):
         self.qkv_same_dim = self.kdim == embed_dim and self.vdim == embed_dim
 
         self.num_heads = num_heads
-        self.dropout_module = FairseqDropout(
-            dropout, module_name=self.__class__.__name__
-        )
 
         self.head_dim = embed_dim // num_heads
         assert (
@@ -51,26 +45,16 @@ class MultiheadAttention(nn.Module):
             "Self-attention requires query, key and " "value to be of the same size"
         )
 
-        self.k_proj = quant_noise(
-            nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
-        self.v_proj = quant_noise(
-            nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
-        self.q_proj = quant_noise(
-            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+        self.batch_first = batch_first
 
-        self.out_proj = quant_noise(
-            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = nn.Linear(self.kdim, embed_dim, bias=bias)
+        self.v_proj = nn.Linear(self.vdim, embed_dim, bias=bias)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        self.dropout = nn.Dropout(dropout)
 
         self.reset_parameters()
-
-        self.onnx_trace = False
-
-    def prepare_for_onnx_export_(self):
-        raise NotImplementedError
 
     def reset_parameters(self):
         if self.qkv_same_dim:
@@ -120,6 +104,14 @@ class MultiheadAttention(nn.Module):
         if need_head_weights:
             need_weights = True
 
+        if self.batch_first:
+            # swap batch and time dims
+            query = query.transpose(0,1)
+            if key is not None:
+                key = key.transpose(0,1)
+            if value is not None:
+                value = value.transpose(0,1)
+
         tgt_len, bsz, embed_dim = query.size()
         src_len = tgt_len
         assert embed_dim == self.embed_dim, f"query dim {embed_dim} != {self.embed_dim}"
@@ -166,7 +158,6 @@ class MultiheadAttention(nn.Module):
             assert key_padding_mask.size(0) == bsz
             assert key_padding_mask.size(1) == src_len
         attn_weights = torch.bmm(q, k.transpose(1, 2))
-        attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
 
         assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 
@@ -189,10 +180,7 @@ class MultiheadAttention(nn.Module):
         if before_softmax:
             return attn_weights, v
 
-        attn_weights_float = utils.softmax(
-            attn_weights, dim=-1, onnx_trace=self.onnx_trace
-        )
-        attn_weights = attn_weights_float.type_as(attn_weights)
+        attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout_module(attn_weights)
 
         assert v is not None
@@ -204,18 +192,17 @@ class MultiheadAttention(nn.Module):
 
         attn_weights: Optional[Tensor] = None
         if need_weights:
-            attn_weights = attn_weights_float.view(
-                bsz, self.num_heads, tgt_len, src_len
-            ).transpose(1, 0)
+            attn_weights = attn_probs.view(bsz, self.num_heads, tgt_len, src_len)
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
 
+        if self.batch_first:
+            attn_output = attn_output.transpose(0,1)
+
         return attn, attn_weights
 
-    def apply_sparse_mask(self, attn_weights, tgt_len: int, src_len: int, bsz: int):
-        return attn_weights
-
+    #TODO
     def upgrade_state_dict_named(self, state_dict, name):
         prefix = name + "." if name != "" else ""
         items_to_add = {}

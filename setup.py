@@ -72,23 +72,24 @@ class CMakeBuild(build_ext):
         subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
         subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
 
-
 setup(
     name="fsp",
     version="0.1.0",
-    description="Scenario optimization based social navigation",
+    description="Predict agent trajectories and"
+                "number of edges of the polygon representing free space available to ego agent",
     author="Abbas Shaikh",
     author_email="abbas22shk@gmail.com",
     url="https://github.com/abbashaikh/fsp.git",
     python_requires=">=3.9",
-    packages=find_packages(where='src'),
-    package_dir={'': 'src'},
+    packages=find_packages(),
+    # C++ extension
     ext_modules=[
         CMakeExtension(
-        'support_pred.halfplane_module',
-        sourcedir='src/support_pred'
+            'data_generation.halfplane_module',
+            sourcedir='data_generation'
         )
     ],
     cmdclass={'build_ext': CMakeBuild},
+    include_package_data=True,
     zip_safe=False,
 )

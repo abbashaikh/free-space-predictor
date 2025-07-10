@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from traj_pred.utils.model_utils import (
+from fsp.utils.model_utils import (
     ModeKeys,
     unpack_rnn_state
 )

@@ -7,11 +7,11 @@ import torch
 import torch.nn as nn
 from trajdata import AgentBatch, AgentType
 
-from traj_pred.modules.mgcvae import MultimodalGenerativeCVAE
-from traj_pred.modules.snce import SocialNCE
-from traj_pred.utils.evaluation import compute_batch_statistics_pt
-from traj_pred.utils.annealing import step_annealers, set_annealing_params
-from traj_pred.utils.model_utils import ModeKeys
+from fsp.modules import MultimodalGenerativeCVAE
+from fsp.modules import SocialNCE
+from fsp.utils.evaluation import compute_batch_statistics_pt
+from fsp.utils.annealing import step_annealers, set_annealing_params
+from fsp.utils.model_utils import ModeKeys
 
 class TrajectoryPredictor(nn.Module):
     """

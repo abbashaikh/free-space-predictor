@@ -7,8 +7,8 @@ import numpy as np
 import torch
 
 from trajdata.data_structures.agent import AgentType
-from traj_pred.modules import ModelRegistrar
-from traj_pred import TrajectoryPredictor
+from fsp.modules import ModelRegistrar
+from fsp.models import TrajectoryPredictor
 from data_generation import (
     SceneAgentBatch,
     transform_coords_np,
@@ -17,7 +17,7 @@ from data_generation import (
     find_sample_size
 )
 
-import support_pred.halfplane_module as hm
+import data_generation.halfplane_module as hm
 
 class SceneProcessor:
     """
@@ -133,7 +133,7 @@ class SceneProcessor:
 
         for idx, ego_pos in enumerate(ego_positions):
             coeffs = get_constraint_coeffs(ego_pos, agent_pos, self.col_radius)   # [T, M, 3]
-            support_estimates[idx, :] = self.processor.get_support(coeffs)          # [T,]
+            support_estimates[idx, :] = self.processor.get_support(coeffs)        # [T,]
 
         return support_estimates.max(axis=1)    # [num_samples,]
 

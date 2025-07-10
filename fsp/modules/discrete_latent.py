@@ -18,7 +18,7 @@ import torch
 import torch.distributions as td
 import wandb
 
-from traj_pred.utils.model_utils import ModeKeys
+from fsp.utils.model_utils import ModeKeys
 
 
 class DiscreteLatent(object):

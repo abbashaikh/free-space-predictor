@@ -25,7 +25,11 @@ and move the directory to a suitable location (for example, `/usr/local/lib`).
 ### Local Packages and C++ Extensions ###
 Update the CMake argument `DCGAL_DIR` (line 43 in `setup.py`) to match the location of your CGAL installation, then run the following from the project's root directory:
 ```sh
-pip install .
+python setup.py build_ext --inplace
+```
+or if you prefer an editable installation
+```sh
+pip install -e .
 ```
 
 ## Trajectory Prediction Model Training ##

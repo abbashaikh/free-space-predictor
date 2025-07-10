@@ -6,8 +6,8 @@ from typing import Dict, Any
 import numpy as np
 import torch
 
-from traj_pred.modules import ModelRegistrar
-from traj_pred import TrajectoryPredictor
+from fsp.modules import ModelRegistrar
+from fsp.models import TrajectoryPredictor
 
 ####### To Calculate Number of Samples #######
 def bisection(N_low, N_high, sample_function): 

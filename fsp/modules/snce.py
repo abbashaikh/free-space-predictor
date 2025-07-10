@@ -6,7 +6,7 @@ import matplotlib
 matplotlib.use('Agg')
 
 from trajdata import AgentBatch
-from traj_pred.utils.sc_sampling import EventSampler
+from fsp.utils.sc_sampling import EventSampler
 
 class ProjHead(nn.Module):
     '''

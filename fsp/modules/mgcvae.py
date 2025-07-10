@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from trajdata import AgentBatch, AgentType
 import wandb
 
-import traj_pred.modules as md
-import traj_pred.dynamics as dynamic_module
+import fsp.modules as md
+import fsp.dynamics as dynamic_module
 
-from traj_pred.utils.model_utils import (
+from fsp.utils.model_utils import (
     ModeKeys,
     mutual_inf_mc,
     get_agent_neigh_joint_state
@@ -278,6 +278,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                 ),
                 diagonal=0,
             )[num_neighbors]
+
             combined_edges[:, with_neighbors], _ = self.node_modules[
                 self.node_type + "/edge_influence_encoder"
             ](
@@ -287,6 +288,7 @@ class MultimodalGenerativeCVAE(nn.Module):
                 key_padding_mask=key_padding_mask[with_neighbors],
                 attn_mask=None,
             )
+
             combined_edges = F.dropout(
                 combined_edges.squeeze(0),
                 p=1.0 - self.hyperparams["rnn_kwargs"]["dropout_keep_prob"],
